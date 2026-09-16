@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/AraneaDev/phrourion/compare/v0.1.2...v0.1.3) (2026-09-16)
+
+
+### Bug Fixes
+
+* size status columns to fit their content ([#10](https://github.com/AraneaDev/phrourion/issues/10)) ([dcf2fcb](https://github.com/AraneaDev/phrourion/commit/dcf2fcb99c000fa91e15fd5342107e7b90533b3e))
+
 ## [0.1.2](https://github.com/AraneaDev/phrourion/compare/v0.1.1...v0.1.2) (2026-09-16)
 
 
