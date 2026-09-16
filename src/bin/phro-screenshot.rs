@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
-use phrourion::{git, model::clean, registry, tui};
+use phrourion::{
+    git::{self, LocalState},
+    model::{Observation, clean},
+    registry, tui,
+};
 use ratatui::{Terminal, backend::TestBackend, buffer::Cell, style::Color};
 use std::{env, fs, path::PathBuf};
 
@@ -36,21 +40,31 @@ fn escape(cell: &Cell) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = env::args().skip(1);
-    let config = args
-        .next()
-        .map(PathBuf::from)
-        .map(Ok)
-        .unwrap_or_else(registry::config_path)?;
+    let config = match args.next() {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => registry::config_path()?,
+    };
     let output = args
         .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("docs/screenshots/dashboard.svg"));
     let mut app = tui::App::new(registry::load(&config)?.repos);
-    for row in &mut app.rows {
-        row.local = match git::snapshot(&row.repo).await {
-            Ok(state) => phrourion::model::Observation::success(state),
-            Err(error) => phrourion::model::Observation::failure(error),
-        };
+    if env::var_os("PHROURION_SCREENSHOT_LIVE").is_some() {
+        for row in &mut app.rows {
+            row.local = match git::snapshot(&row.repo).await {
+                Ok(state) => Observation::success(state),
+                Err(error) => Observation::failure(error),
+            };
+        }
+    } else {
+        for row in &mut app.rows {
+            row.local = Observation::success(LocalState {
+                branch: "main".into(),
+                head: "0000000".into(),
+                upstream: "origin/main".into(),
+                ..LocalState::default()
+            });
+        }
     }
     let backend = TestBackend::new(140, 42);
     let mut terminal = Terminal::new(backend)?;

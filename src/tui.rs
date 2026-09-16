@@ -9,7 +9,8 @@ use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
-    widgets::{Block, Paragraph, Row, Table, TableState, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 use std::{
     collections::HashMap,
@@ -177,6 +178,134 @@ fn count<T>(value: &Observation<Vec<T>>) -> String {
     }
 }
 
+fn spinner_frame(frame: usize) -> &'static str {
+    ["·", "∘", "○", "◌", "○", "∘"][frame % 6]
+}
+
+fn meter(value: usize, total: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let filled = if total == 0 {
+        0
+    } else {
+        value.saturating_mul(width).div_ceil(total).min(width)
+    };
+    format!("{}{}", "█".repeat(filled), " ".repeat(width - filled))
+}
+
+fn known_count<T>(value: &Observation<Vec<T>>) -> usize {
+    if value.supported && value.error.is_none() {
+        value.data.as_ref().map_or(0, Vec::len)
+    } else {
+        0
+    }
+}
+
+fn action_message(
+    dirty: usize,
+    behind: usize,
+    failures: usize,
+    releases: usize,
+    prs: usize,
+) -> String {
+    if failures > 0 {
+        return format!("inspect {failures} failing checks");
+    }
+    if dirty > 0 {
+        return format!(
+            "clean {dirty} dirty checkout{}",
+            if dirty == 1 { "" } else { "s" }
+        );
+    }
+    if behind > 0 {
+        return format!(
+            "pull {behind} repositor{}",
+            if behind == 1 { "y" } else { "ies" }
+        );
+    }
+    if releases > 0 && prs > 0 {
+        return format!(
+            "review {releases} release{} and {prs} pull request{}",
+            if releases == 1 { "" } else { "s" },
+            if prs == 1 { "" } else { "s" }
+        );
+    }
+    if releases > 0 {
+        return format!(
+            "review {releases} release{}",
+            if releases == 1 { "" } else { "s" }
+        );
+    }
+    if prs > 0 {
+        return format!(
+            "review {prs} pull request{}",
+            if prs == 1 { "" } else { "s" }
+        );
+    }
+    "all clear".into()
+}
+
+fn triage(app: &App) -> (usize, usize, usize, usize, usize, usize, String) {
+    let mut dirty = 0;
+    let mut behind = 0;
+    let mut failures = 0;
+    let mut prs = 0;
+    let mut releases = 0;
+    for row in &app.rows {
+        if let Some(local) = &row.local.data {
+            dirty += usize::from(local.dirty());
+            behind += usize::from(local.behind > 0);
+        }
+        failures += usize::from(ci_label(&row.remote) == "fail");
+        prs += known_count(&row.remote.prs);
+        releases += known_count(&row.remote.proposals) + known_count(&row.remote.drafts);
+    }
+    let actionable = failures + dirty + behind + prs + releases;
+    (
+        dirty,
+        behind,
+        failures,
+        prs,
+        releases,
+        actionable,
+        action_message(dirty, behind, failures, releases, prs),
+    )
+}
+
+fn health_glyph(row: &RowState) -> &'static str {
+    if row.local.error.is_some()
+        || row.remote.default_branch.error.is_some()
+        || row.remote.ci.error.is_some()
+    {
+        "!"
+    } else if row.local_busy || row.remote_busy {
+        spinner_frame(animation_frame())
+    } else if row.local.data.as_ref().is_some_and(LocalState::dirty) {
+        "◆"
+    } else if row.local.data.as_ref().is_some_and(|s| s.behind > 0) {
+        "↓"
+    } else {
+        "●"
+    }
+}
+
+fn animation_frame() -> usize {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .saturating_div(140) as usize
+}
+
+fn status_color(row: &RowState) -> Color {
+    match health_glyph(row) {
+        "!" => Color::Red,
+        "◆" | "↓" => Color::Yellow,
+        _ => Color::Green,
+    }
+}
+
 fn ci_label(state: &RemoteState) -> String {
     let observation = &state.ci;
     if !observation.supported {
@@ -249,8 +378,9 @@ fn items(label: &str, observation: &Observation<Vec<crate::model::Item>>) -> Str
 pub fn draw(frame: &mut Frame, app: &App) {
     let areas = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Percentage(45),
-        Constraint::Min(5),
+        Constraint::Length(3),
+        Constraint::Percentage(42),
+        Constraint::Min(6),
         Constraint::Length(2),
     ])
     .split(frame.area());
@@ -266,6 +396,68 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         areas[0],
+    );
+    let (dirty, behind, failures, prs, releases, actionable, action) = triage(app);
+    let spinner = if app.action_busy {
+        format!("{} ", spinner_frame(animation_frame()))
+    } else {
+        String::new()
+    };
+    let watchline = app
+        .rows
+        .iter()
+        .map(health_glyph)
+        .collect::<Vec<_>>()
+        .join("");
+    let calm = app
+        .rows
+        .iter()
+        .filter(|row| health_glyph(row) == "●")
+        .count();
+    let action_color = if failures > 0 {
+        Color::Red
+    } else if actionable > 0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {spinner}{dirty} dirty  "),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!("{behind} behind  "),
+                Style::default().fg(Color::Blue),
+            ),
+            Span::styled(format!("{prs} PRs  "), Style::default().fg(Color::Magenta)),
+            Span::styled(
+                format!("{releases} releases  "),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!("{failures} failing  "),
+                Style::default().fg(Color::Red),
+            ),
+            Span::styled(
+                format!("ACTION: {action}  "),
+                Style::default()
+                    .fg(action_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("health {}  ", meter(calm, app.rows.len(), 8)),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!("watch {watchline}"),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]))
+        .block(Block::bordered().title(" Triage "))
+        .style(Style::default().fg(Color::Gray)),
+        areas[1],
     );
     let visible = app.visible();
     let narrow = frame.area().width < 90;
@@ -291,16 +483,30 @@ pub fn draw(frame: &mut Frame, app: &App) {
         } else {
             local
         };
-        let mut cells = vec![clean(&r.repo.name), branch, local, sync];
+        let tone = status_color(r);
+        let mut cells = vec![
+            Cell::from(format!("{} {}", health_glyph(r), clean(&r.repo.name)))
+                .style(Style::default().fg(tone)),
+            Cell::from(branch).style(Style::default().fg(Color::Blue)),
+            Cell::from(local).style(Style::default().fg(tone)),
+            Cell::from(sync).style(Style::default().fg(tone)),
+        ];
         if !narrow {
             cells.extend([
-                count(&r.remote.prs),
-                format!(
+                Cell::from(count(&r.remote.prs)).style(Style::default().fg(Color::Magenta)),
+                Cell::from(format!(
                     "{} / {}",
                     count(&r.remote.proposals),
                     count(&r.remote.drafts)
-                ),
-                ci_label(&r.remote),
+                ))
+                .style(Style::default().fg(Color::Yellow)),
+                Cell::from(ci_label(&r.remote)).style(Style::default().fg(
+                    if ci_label(&r.remote) == "fail" {
+                        Color::Red
+                    } else {
+                        Color::Green
+                    },
+                )),
             ]);
         }
         Row::new(cells)
@@ -327,7 +533,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .highlight_symbol("> ");
     frame.render_stateful_widget(
         table,
-        areas[1],
+        areas[2],
         &mut TableState::default().with_selected(Some(app.selected)),
     );
     let mut details = String::new();
@@ -416,7 +622,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false })
             .scroll((app.scroll, 0)),
-        areas[2],
+        areas[3],
     );
     let hint = match &app.mode {
         Mode::Add(s) => format!("Add: PATH | REMOTE (remote optional): {}  [Enter save / Esc cancel]", clean(s)),
@@ -424,12 +630,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Confirm(p) => format!("Pull {} [{}] {} -> {} ({} commits)? y / n", clean(&p.repo.path.display().to_string()), clean(&p.before.branch), &p.before.head[..7.min(p.before.head.len())], &p.target[..7.min(p.target.len())], p.before.behind),
         Mode::Remove(name) => format!("Remove {} from registry only? y / n", clean(name)),
         Mode::Help => "j/k move | 1-5 tabs | PgUp/PgDn scroll | a add | d remove | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
-        Mode::Normal if app.action_busy => "Action running... monitoring remains available".into(),
+        Mode::Normal if app.action_busy => format!("{} action running... monitoring remains available", spinner_frame(animation_frame())),
         Mode::Normal => format!("a add  d remove  / filter  1-5 details  r refresh  p pull  o browser  ? help  q quit\n{}", app.log.last().map(|s| clean(s.lines().next().unwrap_or(""))).unwrap_or_default()),
     };
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::Cyan)),
-        areas[3],
+        areas[4],
     );
 }
 
@@ -748,5 +954,31 @@ mod tests {
         let o: Observation<Vec<String>> = Observation::failure("denied");
         assert_eq!(count(&o), "unknown");
         assert_eq!(count(&Observation::<Vec<String>>::success(vec![])), "0");
+    }
+
+    #[test]
+    fn spinner_cycles_through_readable_unicode_frames() {
+        assert_eq!(spinner_frame(0), "·");
+        assert_eq!(spinner_frame(5), "∘");
+        assert_eq!(spinner_frame(6), "·");
+    }
+
+    #[test]
+    fn meter_is_bounded_and_preserves_empty_state() {
+        assert_eq!(meter(0, 10, 8), "        ");
+        assert_eq!(meter(5, 10, 8), "████    ");
+        assert_eq!(meter(20, 10, 8), "████████");
+    }
+
+    #[test]
+    fn action_message_prioritizes_failures_then_work() {
+        assert_eq!(action_message(0, 0, 2, 0, 0), "inspect 2 failing checks");
+        assert_eq!(action_message(1, 3, 0, 0, 0), "clean 1 dirty checkout");
+        assert_eq!(action_message(0, 3, 0, 0, 0), "pull 3 repositories");
+        assert_eq!(
+            action_message(0, 0, 0, 1, 2),
+            "review 1 release and 2 pull requests"
+        );
+        assert_eq!(action_message(0, 0, 0, 0, 0), "all clear");
     }
 }

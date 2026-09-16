@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scripts/screenshot.sh "${PHROURION_SCREENSHOT_CONFIG-}" docs/screenshots/dashboard.svg
+git add docs/screenshots/dashboard.svg
