@@ -35,7 +35,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: ${{ steps.release.outputs.release_created }}
         with:
-          toolchain: 1.85.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         if: ${{ steps.release.outputs.release_created }}

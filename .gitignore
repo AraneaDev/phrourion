@@ -1,3 +1,4 @@
 /target/
+/coverage/
 *.log
 .DS_Store
