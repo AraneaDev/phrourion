@@ -600,58 +600,92 @@ pub fn draw(frame: &mut Frame, app: &App) {
     );
     let visible = app.visible();
     let narrow = frame.area().width < 90;
-    let rows = visible.iter().map(|&i| {
-        let r = &app.rows[i];
-        let (branch, local, sync) = match &r.local.data {
-            Some(s) => (
-                clean(&s.branch),
-                if s.dirty() {
-                    format!(
-                        "S{} M{} ?{} !{}",
-                        s.staged, s.modified, s.untracked, s.conflicts
-                    )
-                } else {
-                    "clean".into()
-                },
-                s.sync(),
-            ),
-            None => ("?".into(), r.local.label(), "unknown".into()),
-        };
-        let local = if r.local.error.is_some() {
-            r.local.label()
-        } else {
-            local
-        };
-        let tone = status_color(r);
-        let right = |s: String, style: Style| {
-            Cell::from(Line::from(s).alignment(Alignment::Right).style(style))
-        };
+    struct RowText {
+        repo_label: String,
+        branch: String,
+        local: String,
+        sync: String,
+        prs: String,
+        rel_draft: String,
+        ci: String,
+        tone: Color,
+        ci_color: Color,
+    }
+    let row_texts: Vec<RowText> = visible
+        .iter()
+        .map(|&i| {
+            let r = &app.rows[i];
+            let (branch, local, sync) = match &r.local.data {
+                Some(s) => (
+                    clean(&s.branch),
+                    if s.dirty() {
+                        format!(
+                            "S{} M{} ?{} !{}",
+                            s.staged, s.modified, s.untracked, s.conflicts
+                        )
+                    } else {
+                        "clean".into()
+                    },
+                    s.sync(),
+                ),
+                None => ("?".into(), r.local.label(), "unknown".into()),
+            };
+            let local = if r.local.error.is_some() {
+                r.local.label()
+            } else {
+                local
+            };
+            let ci = ci_label(&r.remote);
+            let ci_color = if ci == "fail" {
+                Color::Red
+            } else {
+                Color::Green
+            };
+            RowText {
+                repo_label: format!("{} {}", health_glyph(r), clean(&r.repo.name)),
+                branch,
+                local,
+                sync,
+                prs: count(&r.remote.prs),
+                rel_draft: format!(
+                    "{} / {}",
+                    count(&r.remote.proposals),
+                    count(&r.remote.drafts)
+                ),
+                ci,
+                tone: status_color(r),
+                ci_color,
+            }
+        })
+        .collect();
+    let column_width = |header: &str, get: fn(&RowText) -> &str| -> u16 {
+        row_texts
+            .iter()
+            .map(|r| get(r).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(header.chars().count()) as u16
+    };
+    let local_w = column_width("Local", |r| &r.local);
+    let sync_w = column_width("Sync*", |r| &r.sync);
+    let prs_w = column_width("PRs", |r| &r.prs);
+    let rel_draft_w = column_width("Rel / Draft", |r| &r.rel_draft);
+    let ci_w = column_width("CI", |r| &r.ci);
+    let right = |s: String, style: Style| {
+        Cell::from(Line::from(s).alignment(Alignment::Right).style(style))
+    };
+    let rows = row_texts.into_iter().map(|r| {
         let mut cells = vec![
-            Cell::from(format!("{} {}", health_glyph(r), clean(&r.repo.name)))
-                .style(Style::default().fg(tone)),
-            Cell::from(branch).style(Style::default().fg(Color::Blue)),
-            right(local, Style::default().fg(tone)),
-            right(sync, Style::default().fg(tone)),
+            Cell::from(r.repo_label).style(Style::default().fg(r.tone)),
+            Cell::from(r.branch).style(Style::default().fg(Color::Blue)),
+            right(r.local, Style::default().fg(r.tone)),
+            right(r.sync, Style::default().fg(r.tone)),
         ];
         if !narrow {
             cells.extend([
-                right(count(&r.remote.prs), Style::default().fg(Color::Magenta)),
-                right(
-                    format!(
-                        "{} / {}",
-                        count(&r.remote.proposals),
-                        count(&r.remote.drafts)
-                    ),
-                    Style::default().fg(Color::Yellow),
-                ),
-                right(
-                    ci_label(&r.remote),
-                    Style::default().fg(if ci_label(&r.remote) == "fail" {
-                        Color::Red
-                    } else {
-                        Color::Green
-                    }),
-                ),
+                right(r.prs, Style::default().fg(Color::Magenta)),
+                right(r.rel_draft, Style::default().fg(Color::Yellow)),
+                right(r.ci, Style::default().fg(r.ci_color)),
             ]);
         }
         Row::new(cells)
@@ -664,17 +698,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
         heading("Sync*"),
     ];
     let mut widths = vec![
-        Constraint::Percentage(20),
-        Constraint::Percentage(32),
-        Constraint::Percentage(15),
-        Constraint::Percentage(15),
+        Constraint::Fill(5),
+        Constraint::Fill(8),
+        Constraint::Length(local_w),
+        Constraint::Length(sync_w),
     ];
     if !narrow {
         headings.extend([heading("PRs"), heading("Rel / Draft"), heading("CI")]);
         widths.extend([
-            Constraint::Length(4),
-            Constraint::Length(12),
-            Constraint::Length(8),
+            Constraint::Length(prs_w),
+            Constraint::Length(rel_draft_w),
+            Constraint::Length(ci_w),
         ]);
     }
     let table = Table::new(rows, widths)
@@ -1271,6 +1305,68 @@ mod tests {
         assert!(exit_skips(KeyCode::Char('q')));
         assert!(exit_skips(KeyCode::Char(' ')));
         assert!(!exit_skips(KeyCode::Enter));
+    }
+
+    #[test]
+    fn status_columns_are_not_truncated_and_headers_align_with_content() {
+        let mut row = test_row(LocalState {
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            ahead: 12,
+            behind: 34,
+            ..LocalState::default()
+        });
+        row.remote.prs = Observation::failure("denied");
+        row.remote.proposals = Observation::failure("denied");
+        row.remote.drafts = Observation::failure("denied");
+        let mut app = App::new(Vec::new());
+        app.rows.push(row);
+
+        let backend = ratatui::backend::TestBackend::new(140, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // One `char` per terminal cell (every symbol used in this UI is a single
+        // Unicode scalar), so byte offsets from `str::find` would misalign across
+        // lines that mix multi-byte glyphs (e.g. health dots) with plain ASCII.
+        let lines: Vec<Vec<char>> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect()
+            })
+            .collect();
+        fn find_end(line: &[char], needle: &str) -> Option<usize> {
+            let needle: Vec<char> = needle.chars().collect();
+            (0..=line.len().checked_sub(needle.len())?)
+                .find(|&start| line[start..start + needle.len()] == needle[..])
+                .map(|start| start + needle.len())
+        }
+
+        let sync_end = lines
+            .iter()
+            .find_map(|l| find_end(l, "diverged +12 -34"))
+            .expect("sync value should not be truncated");
+        let reldraft_end = lines
+            .iter()
+            .find_map(|l| find_end(l, "unknown / unknown"))
+            .expect("rel/draft value should not be truncated");
+        let header_line = lines
+            .iter()
+            .find(|l| find_end(l, "Rel / Draft").is_some())
+            .expect("header row should be present");
+
+        let sync_header_end = find_end(header_line, "Sync*").unwrap();
+        assert_eq!(
+            sync_end, sync_header_end,
+            "Sync* header should sit flush with the right edge of its column"
+        );
+
+        let reldraft_header_end = find_end(header_line, "Rel / Draft").unwrap();
+        assert_eq!(
+            reldraft_end, reldraft_header_end,
+            "Rel / Draft header should sit flush with the right edge of its column"
+        );
     }
 
     #[test]
