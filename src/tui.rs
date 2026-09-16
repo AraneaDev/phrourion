@@ -7,7 +7,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Flex, Layout},
     prelude::Alignment,
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -67,21 +67,138 @@ pub struct App {
 }
 
 const STARTUP_FRAMES: usize = 6;
-const STARTUP_TOWER: [&str; STARTUP_FRAMES] = [
-    "        /\\        \n       /##\\       \n      /####\\      \n      | [] |      \n      |____|      ",
-    "        /\\        \n       /##\\       \n      /####\\      \n      | <> |      \n      |____|      ",
-    "        /\\        \n       /##\\       \n      /####\\      \n      | ][ |      \n      |____|      ",
-    "        /\\        \n       /##\\       \n      /####\\      \n      | >< |      \n      |____|      ",
-    "        /\\        \n       /##\\       \n      /####\\      \n      | ][ |      \n      |____|      ",
-    "        /\\        \n       /##\\       \n      /####\\      \n      | [] |      \n      |____|      ",
-];
+const STARTUP_FRAME_MS: u64 = 900;
+const STARTUP_DURATION_MS: u64 = STARTUP_FRAME_MS * STARTUP_FRAMES as u64;
+const EXIT_FRAMES: usize = STARTUP_FRAMES;
+const SCENE_WIDTH: usize = 40;
+const SCENE_HEIGHT: usize = 18;
 
-fn startup_frame(frame: usize) -> &'static str {
-    STARTUP_TOWER[frame % STARTUP_FRAMES]
+fn tower_scene(frame: usize, exiting: bool) -> String {
+    let step = frame.min(5);
+    let mut grid = vec![vec![' '; SCENE_WIDTH]; SCENE_HEIGHT];
+    fn put(grid: &mut [Vec<char>], x: usize, y: usize, text: &str) {
+        for (offset, ch) in text.chars().enumerate() {
+            if let Some(cell) = grid.get_mut(y).and_then(|row| row.get_mut(x + offset)) {
+                *cell = ch;
+            }
+        }
+    }
+    fn centered(grid: &mut [Vec<char>], y: usize, text: &str) {
+        put(grid, (SCENE_WIDTH - text.len()) / 2, y, text);
+    }
+    centered(&mut grid, 0, "P H R O U R I O N");
+    // Tower geometry never changes. All sprites use the same cell coordinates.
+    for (y, row) in [
+        "   /\\   ",
+        "  /##\\  ",
+        " /####\\ ",
+        "|      |",
+        "|      |",
+        "|------|",
+        "|      |",
+        "|      |",
+        "|      |",
+        "|______|",
+    ]
+    .iter()
+    .enumerate()
+    {
+        put(&mut grid, 16, y + 2, row);
+    }
+    let guard = if exiting {
+        match step {
+            0 => Some((18, 5)),
+            1 => Some((18, 7)),
+            2 => Some((24, 9)),
+            3 => Some((29, 9)),
+            4 => Some((34, 9)),
+            _ => None,
+        }
+    } else {
+        Some(match step {
+            0 => (2, 9),
+            1 => (8, 9),
+            2 => (13, 9),
+            3 => (18, 9),
+            4 => (18, 7),
+            _ => (18, 5),
+        })
+    };
+    if let Some((x, y)) = guard {
+        put(&mut grid, x, y, " o ");
+        put(&mut grid, x, y + 1, "/|\\");
+        put(
+            &mut grid,
+            x,
+            y + 2,
+            if step % 2 == 0 { "/ \\" } else { " /|" },
+        );
+    }
+    let lit = (!exiting && step == 5) || (exiting && step == 0);
+    if lit {
+        put(&mut grid, 22, 5, "*");
+    }
+    let caption = match (exiting, step) {
+        (true, 5) => "The tower is dark",
+        (true, _) => "Leaving the watch",
+        (false, 5) => "WATCH ESTABLISHED",
+        (false, _) => "Taking the watch",
+    };
+    centered(&mut grid, 13, caption);
+    centered(&mut grid, 15, "Aranea Development");
+    centered(
+        &mut grid,
+        17,
+        if exiting {
+            "[ Space / q ] skip"
+        } else {
+            "[ Space ] skip"
+        },
+    );
+    grid.into_iter()
+        .map(|row| row.into_iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn draw_animation(frame: &mut Frame, scene: String) {
+    let vertical = Layout::vertical([Constraint::Length(SCENE_HEIGHT as u16)])
+        .flex(Flex::Center)
+        .split(frame.area())[0];
+    let area = Layout::horizontal([Constraint::Length(SCENE_WIDTH as u16)])
+        .flex(Flex::Center)
+        .split(vertical)[0];
+    let lines: Vec<Line> = scene
+        .lines()
+        .enumerate()
+        .map(|(y, line)| {
+            Line::styled(
+                line.to_owned(),
+                Style::default().fg(if y == 15 || y == 17 {
+                    Color::DarkGray
+                } else {
+                    Color::Cyan
+                }),
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Left), area);
+}
+
+fn startup_scene(frame: usize) -> String {
+    tower_scene(frame, false)
+}
+
+fn exit_scene(frame: usize) -> String {
+    tower_scene(frame, true)
 }
 
 fn startup_skips(key: KeyCode) -> bool {
     key == KeyCode::Char(' ')
+}
+
+fn exit_skips(key: KeyCode) -> bool {
+    matches!(key, KeyCode::Char('q') | KeyCode::Char(' '))
 }
 
 fn cache_path(repo: &Repo) -> Option<PathBuf> {
@@ -298,12 +415,14 @@ fn health_glyph(row: &RowState) -> &'static str {
         || row.remote.ci.error.is_some()
     {
         "!"
-    } else if row.local_busy || row.remote_busy {
-        spinner_frame(animation_frame())
     } else if row.local.data.as_ref().is_some_and(LocalState::dirty) {
         "◆"
     } else if row.local.data.as_ref().is_some_and(|s| s.behind > 0) {
         "↓"
+    } else if row.local.data.is_none() && (row.local_busy || row.remote_busy) {
+        spinner_frame(animation_frame())
+    } else if row.local.data.is_none() {
+        "·"
     } else {
         "●"
     }
@@ -321,6 +440,7 @@ fn status_color(row: &RowState) -> Color {
     match health_glyph(row) {
         "!" => Color::Red,
         "◆" | "↓" => Color::Yellow,
+        "·" => Color::DarkGray,
         _ => Color::Green,
     }
 }
@@ -405,7 +525,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .split(frame.area());
     frame.render_widget(
         Paragraph::new(format!(
-            " Phrourion  |  {} repositories  |  filter: {}",
+            " P H R O U R I O N  |  {} repositories  |  filter: {}",
             app.rows.len(),
             clean(&app.filter)
         ))
@@ -474,7 +594,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 Style::default().fg(Color::Cyan),
             ),
         ]))
-        .block(Block::bordered().title(" Triage "))
+        .block(Block::bordered().title(" Triage  /  WATCH "))
         .style(Style::default().fg(Color::Gray)),
         areas[1],
     );
@@ -653,15 +773,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Normal => format!("a add  d remove  / filter  1-5 details  r refresh  p pull  o browser  ? help  q quit\n{}", app.log.last().map(|s| clean(s.lines().next().unwrap_or(""))).unwrap_or_default()),
     };
     frame.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(Color::Cyan)),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Aranea Development  |  ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(hint, Style::default().fg(Color::Cyan)),
+        ])),
         areas[4],
     );
 }
 
 async fn startup_screen(terminal: &mut DefaultTerminal) -> Result<()> {
     let started = Instant::now();
-    let frame_time = Duration::from_millis(180);
-    let duration = frame_time * STARTUP_FRAMES as u32;
+    let frame_time = Duration::from_millis(STARTUP_FRAME_MS);
+    let duration = Duration::from_millis(STARTUP_DURATION_MS);
     terminal.clear()?;
     loop {
         if event::poll(Duration::from_millis(20))?
@@ -675,23 +801,31 @@ async fn startup_screen(terminal: &mut DefaultTerminal) -> Result<()> {
             break;
         }
         let frame = elapsed.as_millis() as usize / frame_time.as_millis() as usize;
-        terminal.draw(|frame_area| {
-            let area = frame_area.area();
-            frame_area.render_widget(
-                Paragraph::new(format!(
-                    "{}\n\nPhrourion is taking the watch",
-                    startup_frame(frame)
-                ))
-                .alignment(Alignment::Center)
-                .style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .bg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                area,
-            );
-        })?;
+        terminal.draw(|area| draw_animation(area, startup_scene(frame)))?;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    terminal.clear()?;
+    Ok(())
+}
+
+async fn exit_screen(terminal: &mut DefaultTerminal) -> Result<()> {
+    let started = Instant::now();
+    let frame_time = Duration::from_millis(STARTUP_FRAME_MS);
+    let duration = frame_time * EXIT_FRAMES as u32;
+    terminal.clear()?;
+    loop {
+        if event::poll(Duration::from_millis(20))?
+            && let Event::Key(key) = event::read()?
+            && exit_skips(key.code)
+        {
+            break;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= duration {
+            break;
+        }
+        let frame = elapsed.as_millis() as usize / frame_time.as_millis() as usize;
+        terminal.draw(|area| draw_animation(area, exit_scene(frame)))?;
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
     terminal.clear()?;
@@ -829,6 +963,7 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
             if key.code == KeyCode::Char('c')
                 && key.modifiers.contains(event::KeyModifiers::CONTROL)
             {
+                exit_screen(terminal).await?;
                 break;
             }
             match &mut app.mode {
@@ -902,7 +1037,10 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                 },
                 Mode::Help => app.mode = Mode::Normal,
                 Mode::Normal => match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') => {
+                        exit_screen(terminal).await?;
+                        break;
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
                         app.selected =
                             (app.selected + 1).min(app.visible().len().saturating_sub(1));
@@ -1001,6 +1139,33 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_row(local: LocalState) -> RowState {
+        RowState {
+            repo: Repo {
+                id: "demo".into(),
+                name: "demo".into(),
+                path: ".".into(),
+                remote: "origin".into(),
+                identity: crate::model::Remote {
+                    kind: crate::model::ProviderKind::Local,
+                    host: String::new(),
+                    project: "demo".into(),
+                },
+                enabled: true,
+                release_workflows: Vec::new(),
+                release_labels: Vec::new(),
+            },
+            local: Observation::success(local),
+            remote: RemoteState::default(),
+            fetched: None,
+            local_busy: true,
+            remote_busy: true,
+            next_remote: Instant::now(),
+            failures: 0,
+        }
+    }
+
     #[test]
     fn empty_screen_renders_at_small_and_large_sizes() {
         for (width, height) in [(40, 12), (120, 40)] {
@@ -1009,7 +1174,16 @@ mod tests {
             terminal.draw(|f| draw(f, &App::new(Vec::new()))).unwrap();
             let buffer = terminal.backend().buffer();
             let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
-            assert!(text.contains("Phrourion"));
+            assert!(text.contains("P H R O U R I O N"));
+            assert!(text.contains("Aranea Development"));
+            let top: String = buffer
+                .content
+                .iter()
+                .take(width as usize)
+                .map(|c| c.symbol())
+                .collect();
+            assert!(top.contains("P H R O U R I O N"));
+            assert!(!top.contains("Aranea Development"));
         }
     }
     #[test]
@@ -1047,9 +1221,8 @@ mod tests {
 
     #[test]
     fn startup_has_a_complete_tower_animation() {
-        assert_eq!(startup_frame(0), startup_frame(STARTUP_FRAMES - 1));
-        assert!(startup_frame(1).contains("/\\"));
-        assert_eq!(startup_frame(STARTUP_FRAMES).len(), startup_frame(0).len());
+        assert_eq!(startup_scene(STARTUP_FRAMES), startup_scene(5));
+        assert!(startup_scene(1).contains("/\\"));
     }
 
     #[test]
@@ -1057,5 +1230,104 @@ mod tests {
         assert!(startup_skips(KeyCode::Char(' ')));
         assert!(!startup_skips(KeyCode::Enter));
         assert!(!startup_skips(KeyCode::Char('q')));
+    }
+
+    #[test]
+    fn startup_scene_moves_guard_into_the_tower() {
+        assert!(startup_scene(0).contains(" o "));
+        assert!(startup_scene(3).contains(" o "));
+        assert!(startup_scene(5).contains(" o "));
+        assert!(startup_scene(5).contains("WATCH"));
+    }
+
+    #[test]
+    fn exit_scene_ends_with_guard_leaving_the_tower() {
+        assert!(exit_scene(0).contains("*"));
+        assert!(exit_scene(EXIT_FRAMES - 1).contains("tower is dark"));
+        assert!(!exit_scene(EXIT_FRAMES - 1).contains("o/"));
+    }
+
+    #[test]
+    fn exit_can_be_skipped_without_waiting() {
+        assert!(exit_skips(KeyCode::Char('q')));
+        assert!(exit_skips(KeyCode::Char(' ')));
+        assert!(!exit_skips(KeyCode::Enter));
+    }
+
+    #[test]
+    fn busy_refresh_keeps_known_health_glyph() {
+        let mut row = test_row(LocalState {
+            staged: 1,
+            ..LocalState::default()
+        });
+        assert_eq!(health_glyph(&row), "◆");
+
+        row.local.data = Some(LocalState::default());
+        assert_eq!(health_glyph(&row), "●");
+    }
+
+    #[test]
+    fn startup_animation_lasts_at_least_twice_the_original_duration() {
+        assert!(std::hint::black_box(STARTUP_DURATION_MS) >= 3_900);
+    }
+
+    #[test]
+    fn animation_tower_is_not_pushed_to_the_right() {
+        for scene in (0..6).flat_map(|i| [startup_scene(i), exit_scene(i)]) {
+            let tower_line = scene
+                .lines()
+                .find(|line| line.contains("/\\") || line.contains("/##\\"))
+                .unwrap();
+            let marker = if tower_line.contains("/\\") {
+                "/\\"
+            } else {
+                "/##\\"
+            };
+            assert!(
+                tower_line.find(marker).unwrap() < 24,
+                "tower line {tower_line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_tower_stays_centered_in_every_frame() {
+        for (width, height) in [(40, 18), (80, 24), (121, 41)] {
+            for step in 0..6 {
+                for scene in [startup_scene(step), exit_scene(step)] {
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                            .unwrap();
+                    terminal
+                        .draw(|frame| draw_animation(frame, scene.clone()))
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let roof: Vec<_> = (0..height)
+                        .flat_map(|y| (0..width).map(move |x| (x, y)))
+                        .filter(|&(x, y)| buffer[(x, y)].symbol() == "#")
+                        .collect();
+                    let left = roof.iter().map(|p| p.0).min().unwrap();
+                    let right = roof.iter().map(|p| p.0).max().unwrap();
+                    assert!((i32::from(left + right) - i32::from(width - 1)).abs() <= 1);
+                    let top = roof.iter().map(|p| p.1).min().unwrap() - 3;
+                    for y in 5..12 {
+                        assert_eq!(buffer[(left - 2, top + y)].symbol(), "|");
+                        assert_eq!(buffer[(right + 2, top + y)].symbol(), "|");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn animation_scene_rows_use_one_fixed_width_canvas() {
+        for scene in (0..6).flat_map(|i| [startup_scene(i), exit_scene(i)]) {
+            assert!(
+                scene
+                    .lines()
+                    .all(|line| line.chars().count() == SCENE_WIDTH),
+                "{scene:?}"
+            );
+        }
     }
 }

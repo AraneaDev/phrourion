@@ -97,11 +97,23 @@ q       quit
 
 ## Install
 
-Build from source with Rust 1.85 or newer:
+Install globally for your user with a current stable Rust toolchain:
 
 ```bash
-cargo install --path .
+cargo install --git https://github.com/AraneaDev/phrourion --locked --bin phro --bin phrourion
 ```
+
+This installs both commands in Cargo's bin directory, usually
+`~/.cargo/bin`. Add that directory to your shell's `PATH` if needed, then run
+`phro` from any folder. No administrator access is required.
+
+From a local checkout, install the current source with:
+
+```bash
+cargo install --path . --locked --bin phro --bin phrourion --force
+```
+
+Run the same command again to update an existing installation.
 
 Authenticate the GitHub CLI if remote GitHub data is wanted:
 
@@ -115,7 +127,7 @@ Discover Git repositories below the current directory and add them to the
 registry:
 
 ```bash
-phro discover --add
+phro discover . --add
 ```
 
 Start the dashboard:
