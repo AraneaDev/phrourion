@@ -136,6 +136,12 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
+Install the repository hook once so the dashboard screenshot stays current:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 See [the design notes](docs/design.md) for the architecture, safety model, and
 provider boundary.
 

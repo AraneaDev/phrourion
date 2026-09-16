@@ -36,11 +36,10 @@ fn escape(cell: &Cell) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = env::args().skip(1);
-    let config = args
-        .next()
-        .map(PathBuf::from)
-        .map(Ok)
-        .unwrap_or_else(registry::config_path)?;
+    let config = match args.next() {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => registry::config_path()?,
+    };
     let output = args
         .next()
         .map(PathBuf::from)
