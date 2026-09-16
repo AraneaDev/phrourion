@@ -770,18 +770,25 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Remove(name) => format!("Remove {} from registry only? y / n", clean(name)),
         Mode::Help => "j/k move | 1-5 tabs | PgUp/PgDn scroll | a add | d remove | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
         Mode::Normal if app.action_busy => format!("{} action running... monitoring remains available", spinner_frame(animation_frame())),
-        Mode::Normal => format!("a add  d remove  / filter  1-5 details  r refresh  p pull  o browser  ? help  q quit\n{}", app.log.last().map(|s| clean(s.lines().next().unwrap_or(""))).unwrap_or_default()),
+        Mode::Normal => "a add  d remove  / filter  1-5 details  r refresh  p pull  o browser  ? help  q quit".into(),
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Aranea Development  |  ",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(hint, Style::default().fg(Color::Cyan)),
-        ])),
-        areas[4],
-    );
+    let mut footer = vec![Line::from(vec![
+        Span::styled(
+            "Aranea Development  |  ",
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(hint, Style::default().fg(Color::Cyan)),
+    ])];
+    if matches!(app.mode, Mode::Normal if !app.action_busy)
+        && let Some(last) = app
+            .log
+            .last()
+            .map(|s| clean(s.lines().next().unwrap_or("")))
+        && !last.is_empty()
+    {
+        footer.push(Line::styled(last, Style::default().fg(Color::Cyan)));
+    }
+    frame.render_widget(Paragraph::new(footer), areas[4]);
 }
 
 async fn startup_screen(terminal: &mut DefaultTerminal) -> Result<()> {
