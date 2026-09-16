@@ -10,6 +10,10 @@ keywords = ["git", "tui", "github", "repositories", "monitor"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
+name = "phrourion"
+path = "src/bin/phrourion.rs"
+
+[[bin]]
 name = "phro"
 path = "src/main.rs"
 
