@@ -8,6 +8,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
+    prelude::Alignment,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap},
@@ -63,6 +64,24 @@ pub struct App {
     pub log: Vec<String>,
     mode: Mode,
     action_busy: bool,
+}
+
+const STARTUP_FRAMES: usize = 6;
+const STARTUP_TOWER: [&str; STARTUP_FRAMES] = [
+    "        /\\        \n       /##\\       \n      /####\\      \n      | [] |      \n      |____|      ",
+    "        /\\        \n       /##\\       \n      /####\\      \n      | <> |      \n      |____|      ",
+    "        /\\        \n       /##\\       \n      /####\\      \n      | ][ |      \n      |____|      ",
+    "        /\\        \n       /##\\       \n      /####\\      \n      | >< |      \n      |____|      ",
+    "        /\\        \n       /##\\       \n      /####\\      \n      | ][ |      \n      |____|      ",
+    "        /\\        \n       /##\\       \n      /####\\      \n      | [] |      \n      |____|      ",
+];
+
+fn startup_frame(frame: usize) -> &'static str {
+    STARTUP_TOWER[frame % STARTUP_FRAMES]
+}
+
+fn startup_skips(key: KeyCode) -> bool {
+    key == KeyCode::Char(' ')
 }
 
 fn cache_path(repo: &Repo) -> Option<PathBuf> {
@@ -639,10 +658,54 @@ pub fn draw(frame: &mut Frame, app: &App) {
     );
 }
 
+async fn startup_screen(terminal: &mut DefaultTerminal) -> Result<()> {
+    let started = Instant::now();
+    let frame_time = Duration::from_millis(180);
+    let duration = frame_time * STARTUP_FRAMES as u32;
+    terminal.clear()?;
+    loop {
+        if event::poll(Duration::from_millis(20))?
+            && let Event::Key(key) = event::read()?
+            && startup_skips(key.code)
+        {
+            break;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= duration {
+            break;
+        }
+        let frame = elapsed.as_millis() as usize / frame_time.as_millis() as usize;
+        terminal.draw(|frame_area| {
+            let area = frame_area.area();
+            frame_area.render_widget(
+                Paragraph::new(format!(
+                    "{}\n\nPhrourion is taking the watch",
+                    startup_frame(frame)
+                ))
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .bg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                area,
+            );
+        })?;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    terminal.clear()?;
+    Ok(())
+}
+
 pub async fn run(config: PathBuf) -> Result<()> {
     let mut app = App::new(registry::load(&config)?.repos);
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &config).await;
+    let result = async {
+        startup_screen(&mut terminal).await?;
+        event_loop(&mut terminal, &mut app, &config).await
+    }
+    .await;
     ratatui::restore();
     result
 }
@@ -980,5 +1043,19 @@ mod tests {
             "review 1 release and 2 pull requests"
         );
         assert_eq!(action_message(0, 0, 0, 0, 0), "all clear");
+    }
+
+    #[test]
+    fn startup_has_a_complete_tower_animation() {
+        assert_eq!(startup_frame(0), startup_frame(STARTUP_FRAMES - 1));
+        assert!(startup_frame(1).contains("/\\"));
+        assert_eq!(startup_frame(STARTUP_FRAMES).len(), startup_frame(0).len());
+    }
+
+    #[test]
+    fn only_space_skips_startup() {
+        assert!(startup_skips(KeyCode::Char(' ')));
+        assert!(!startup_skips(KeyCode::Enter));
+        assert!(!startup_skips(KeyCode::Char('q')));
     }
 }
