@@ -111,17 +111,18 @@ Discover Git repositories below the current directory and add them to the
 registry:
 
 ```bash
-phrourion discover --add
+phro discover --add
 ```
 
 Start the dashboard:
 
 ```bash
-phrourion
+phro
 ```
 
-The command line also supports `phrourion add`, `phrourion remove`,
-`phrourion list`, and `phrourion status`. Run `phrourion --help` for all options.
+`phro` is the short command name. The full `phrourion` binary is installed too.
+Both support `add`, `remove`, `list`, and `status`. Run `phro --help` for all
+options.
 
 ## Development
 
