@@ -623,39 +623,45 @@ pub fn draw(frame: &mut Frame, app: &App) {
             local
         };
         let tone = status_color(r);
+        let right = |s: String, style: Style| {
+            Cell::from(Line::from(s).alignment(Alignment::Right).style(style))
+        };
         let mut cells = vec![
             Cell::from(format!("{} {}", health_glyph(r), clean(&r.repo.name)))
                 .style(Style::default().fg(tone)),
             Cell::from(branch).style(Style::default().fg(Color::Blue)),
-            Cell::from(local).style(Style::default().fg(tone)),
-            Cell::from(sync).style(Style::default().fg(tone)),
+            right(local, Style::default().fg(tone)),
+            right(sync, Style::default().fg(tone)),
         ];
         if !narrow {
             cells.extend([
-                Cell::from(count(&r.remote.prs)).style(Style::default().fg(Color::Magenta)),
-                Cell::from(format!(
-                    "{} / {}",
-                    count(&r.remote.proposals),
-                    count(&r.remote.drafts)
-                ))
-                .style(Style::default().fg(Color::Yellow)),
-                Cell::from(ci_label(&r.remote)).style(Style::default().fg(
-                    if ci_label(&r.remote) == "fail" {
+                right(count(&r.remote.prs), Style::default().fg(Color::Magenta)),
+                right(
+                    format!(
+                        "{} / {}",
+                        count(&r.remote.proposals),
+                        count(&r.remote.drafts)
+                    ),
+                    Style::default().fg(Color::Yellow),
+                ),
+                right(
+                    ci_label(&r.remote),
+                    Style::default().fg(if ci_label(&r.remote) == "fail" {
                         Color::Red
                     } else {
                         Color::Green
-                    },
-                )),
+                    }),
+                ),
             ]);
         }
         Row::new(cells)
     });
     let mut headings = vec!["Repository", "Branch", "Local", "Sync*"];
     let mut widths = vec![
-        Constraint::Percentage(22),
-        Constraint::Percentage(17),
         Constraint::Percentage(20),
-        Constraint::Percentage(19),
+        Constraint::Percentage(32),
+        Constraint::Percentage(15),
+        Constraint::Percentage(15),
     ];
     if !narrow {
         headings.extend(["PRs", "Rel / Draft", "CI"]);
