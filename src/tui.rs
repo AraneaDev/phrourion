@@ -656,7 +656,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Row::new(cells)
     });
-    let mut headings = vec!["Repository", "Branch", "Local", "Sync*"];
+    let heading = |s: &'static str| Cell::from(Line::from(s).alignment(Alignment::Right));
+    let mut headings = vec![
+        Cell::from("Repository"),
+        Cell::from("Branch"),
+        heading("Local"),
+        heading("Sync*"),
+    ];
     let mut widths = vec![
         Constraint::Percentage(20),
         Constraint::Percentage(32),
@@ -664,7 +670,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Constraint::Percentage(15),
     ];
     if !narrow {
-        headings.extend(["PRs", "Rel / Draft", "CI"]);
+        headings.extend([heading("PRs"), heading("Rel / Draft"), heading("CI")]);
         widths.extend([
             Constraint::Length(4),
             Constraint::Length(12),
