@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/AraneaDev/phrourion/compare/v0.1.1...v0.1.2) (2026-09-16)
+
+
+### Bug Fixes
+
+* right-align table headers to match status columns ([#8](https://github.com/AraneaDev/phrourion/issues/8)) ([c86a2c7](https://github.com/AraneaDev/phrourion/commit/c86a2c7f875a8a15f719be5b44bae4c019a09023))
+
 ## [0.1.1](https://github.com/AraneaDev/phrourion/compare/v0.1.0...v0.1.1) (2026-09-16)
 
 
