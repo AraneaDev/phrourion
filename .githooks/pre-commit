@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -n "${PHROURION_SCREENSHOT_CONFIG-}" ]]; then
-  scripts/screenshot.sh "$PHROURION_SCREENSHOT_CONFIG" docs/screenshots/dashboard.svg
-  git add docs/screenshots/dashboard.svg
-else
-  scripts/check-screenshot.sh
-fi
+scripts/screenshot.sh "${PHROURION_SCREENSHOT_CONFIG-}" docs/screenshots/dashboard.svg
+git add docs/screenshots/dashboard.svg
