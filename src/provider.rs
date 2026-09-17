@@ -146,6 +146,19 @@ fn is_pull_request(v: &Value) -> bool {
     !v["pull_request"].is_null()
 }
 
+// An empty filter list means unfiltered; otherwise the issue must carry at least one.
+fn matches_issue_labels(v: &Value, labels: &[String]) -> bool {
+    if labels.is_empty() {
+        return true;
+    }
+    v["labels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l["name"].as_str())
+        .any(|n| labels.iter().any(|x| x == n))
+}
+
 fn issue_item(v: &Value) -> Item {
     Item {
         title: format!("#{} {}", v["number"], text(v, "title")),
@@ -254,6 +267,7 @@ impl RemoteProvider for Github {
                 Ok(rows) => Observation::success(
                     rows.iter()
                         .filter(|v| !is_pull_request(v))
+                        .filter(|v| matches_issue_labels(v, &repo.issue_labels))
                         .map(issue_item)
                         .collect(),
                 ),
@@ -423,6 +437,19 @@ mod tests {
         assert!(!requested_reviewer(&pr, "someone-else"));
         assert!(!requested_reviewer(&pr, ""));
         assert!(!requested_reviewer(&json!({}), "octocat"));
+    }
+
+    #[test]
+    fn issue_label_filter_is_permissive_when_empty_and_an_any_match_otherwise() {
+        let issue = json!({"labels": [{"name": "bug"}, {"name": "triage"}]});
+        assert!(matches_issue_labels(&issue, &[]));
+        assert!(matches_issue_labels(&issue, &["bug".into()]));
+        assert!(matches_issue_labels(
+            &issue,
+            &["unrelated".into(), "triage".into()]
+        ));
+        assert!(!matches_issue_labels(&issue, &["unrelated".into()]));
+        assert!(!matches_issue_labels(&json!({}), &["bug".into()]));
     }
 
     #[test]

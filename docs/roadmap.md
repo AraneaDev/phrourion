@@ -39,7 +39,9 @@ Issues support sees real use), and any comment/close/merge action from the TUI
   background daemon; no notification if `phro` isn't open. *Not started.*
 - **Per-repo label filters** — an `issue_labels` field in `repos.toml`
   mirroring the existing `release_labels` pattern, to narrow the Issues list
-  per repository. *Not started.*
+  per repository. *Shipped* (client-side OR match on label name; empty list
+  means unfiltered, same default as `release_labels`; no in-TUI editor,
+  hand-edit `repos.toml` like the other adapter-tuning fields).
 
 Deliberately dropped this round: repo groups/tags — premature until someone's
 registry is large enough to need grouping.

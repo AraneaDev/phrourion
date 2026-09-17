@@ -32,6 +32,8 @@ pub struct Repo {
     pub release_workflows: Vec<String>,
     #[serde(default)]
     pub release_labels: Vec<String>,
+    #[serde(default)]
+    pub issue_labels: Vec<String>,
 }
 
 fn enabled() -> bool {

@@ -250,6 +250,7 @@ fn cache_path(repo: &Repo) -> Option<PathBuf> {
     format!("{:?}", repo.identity).hash(&mut hasher);
     repo.release_workflows.hash(&mut hasher);
     repo.release_labels.hash(&mut hasher);
+    repo.issue_labels.hash(&mut hasher);
     Some(
         dirs::cache_dir()?
             .join("phrourion")
@@ -866,7 +867,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 ));
                 details.push_str(&items("Awaiting your review", &row.remote.review_requests));
             }
-            3 => details.push_str(&items("Open issues", &row.remote.issues)),
+            3 => {
+                let label = if row.repo.issue_labels.is_empty() {
+                    "Open issues (configure issue_labels to filter)".to_string()
+                } else {
+                    format!(
+                        "Open issues (filtered by label: {})",
+                        row.repo.issue_labels.join(", ")
+                    )
+                };
+                details.push_str(&items(&label, &row.remote.issues));
+            }
             4 => {
                 details.push_str(&items("Release proposals", &row.remote.proposals));
                 details.push_str(&items("Draft releases", &row.remote.drafts));
@@ -1310,6 +1321,7 @@ mod tests {
                 enabled: true,
                 release_workflows: Vec::new(),
                 release_labels: Vec::new(),
+                issue_labels: Vec::new(),
             },
             local: Observation::success(local),
             remote: RemoteState::default(),
