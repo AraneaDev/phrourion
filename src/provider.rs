@@ -93,7 +93,7 @@ pub fn flatten_pages(value: Value, key: Option<&str>) -> Result<Vec<Value>> {
     Ok(rows)
 }
 
-fn text(v: &Value, key: &str) -> String {
+pub(crate) fn text(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or_default().into()
 }
 
@@ -127,7 +127,7 @@ pub fn release_evidence(v: &Value, labels: &[String]) -> Option<String> {
     None
 }
 
-fn pr_item(v: &Value) -> Item {
+pub(crate) fn pr_item(v: &Value) -> Item {
     Item {
         title: format!("#{} {}", v["number"], text(v, "title")),
         url: text(v, "html_url"),
@@ -147,7 +147,7 @@ fn is_pull_request(v: &Value) -> bool {
 }
 
 // An empty filter list means unfiltered; otherwise the issue must carry at least one.
-fn matches_issue_labels(v: &Value, labels: &[String]) -> bool {
+pub(crate) fn matches_issue_labels(v: &Value, labels: &[String]) -> bool {
     if labels.is_empty() {
         return true;
     }
@@ -159,7 +159,7 @@ fn matches_issue_labels(v: &Value, labels: &[String]) -> bool {
         .any(|n| labels.iter().any(|x| x == n))
 }
 
-fn issue_item(v: &Value) -> Item {
+pub(crate) fn issue_item(v: &Value) -> Item {
     Item {
         title: format!("#{} {}", v["number"], text(v, "title")),
         url: text(v, "html_url"),
@@ -170,6 +170,14 @@ fn issue_item(v: &Value) -> Item {
             .filter_map(|l| l["name"].as_str())
             .collect::<Vec<_>>()
             .join(", "),
+    }
+}
+
+pub(crate) fn release_item(v: &Value) -> Item {
+    Item {
+        title: text(v, "tag_name"),
+        url: text(v, "html_url"),
+        detail: format!("published {}", text(v, "published_at")),
     }
 }
 
@@ -275,21 +283,16 @@ impl RemoteProvider for Github {
             };
             match releases.and_then(|v| flatten_pages(v, None)) {
                 Ok(rows) => {
-                    let item = |v: &Value| Item {
-                        title: text(v, "tag_name"),
-                        url: text(v, "html_url"),
-                        detail: format!("published {}", text(v, "published_at")),
-                    };
                     state.drafts = Observation::success(
                         rows.iter()
                             .filter(|v| v["draft"] == true)
-                            .map(item)
+                            .map(release_item)
                             .collect(),
                     );
                     state.published = Observation::success(
                         rows.iter()
                             .filter(|v| v["draft"] == false)
-                            .map(item)
+                            .map(release_item)
                             .collect(),
                     );
                 }
