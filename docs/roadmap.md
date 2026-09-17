@@ -11,14 +11,15 @@ ordered by priority within a group; status reflects what has actually shipped.
   Attention ranking, same as open PRs today). *Shipped.*
 - **Requested reviews** — pull requests, in any registered repository, where
   the authenticated `gh` user is a requested reviewer. The "waiting on me"
-  signal, distinct from the existing PR list. *Not started.*
-- **GitLab adapter** — same `RemoteProvider` shape as GitHub's, via `glab`.
-  Waits on having a way to test against GitLab (account/token or a local
-  instance). *Not started.*
-- **Forgejo adapter** — locally testable now; build before GitLab.
-  *Not started.*
-- **Bitbucket adapter** — locally testable now; build before GitLab.
-  *Not started.*
+  signal, distinct from the existing PR list. *Shipped* (individual reviewer
+  requests only; team review requests aren't resolved to "is this me").
+- **GitLab, Forgejo, Bitbucket adapters** — same `RemoteProvider` shape as
+  GitHub's. *Deprioritized:* staying GitHub-only for now; revisit once the
+  GitHub-side backlog is done. (A Forgejo API shape was scoped during
+  brainstorming — see git history if picking this back up: default branch,
+  branches use `commit.id` not `commit.sha`, issues filter server-side via
+  `?type=issues`, auth is `Authorization: token <value>` sourced from a
+  per-host env var, no bundled CLI equivalent to `gh` so it'd go over HTTP.)
 
 ## New actions
 

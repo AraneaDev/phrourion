@@ -266,6 +266,7 @@ fn cached(repo: &Repo) -> RemoteState {
             default_branch: Observation::failure("Cached; awaiting refresh"),
             branches: Observation::failure("Cached; awaiting refresh"),
             prs: Observation::failure("Cached; awaiting refresh"),
+            review_requests: Observation::failure("Cached; awaiting refresh"),
             issues: Observation::failure("Cached; awaiting refresh"),
             proposals: Observation::failure("Cached; awaiting refresh"),
             drafts: Observation::failure("Cached; awaiting refresh"),
@@ -670,6 +671,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         local: String,
         sync: String,
         prs: String,
+        review: String,
         issues: String,
         rel_draft: String,
         ci: String,
@@ -713,6 +715,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 local,
                 sync,
                 prs: count(&r.remote.prs),
+                review: count(&r.remote.review_requests),
                 issues: count(&r.remote.issues),
                 rel_draft: format!(
                     "{} / {}",
@@ -737,6 +740,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let attention_w = column_width("Attention", |r| &r.attention);
     let sync_w = column_width("Sync*", |r| &r.sync);
     let prs_w = column_width("PRs", |r| &r.prs);
+    let review_w = column_width("Review", |r| &r.review);
     let issues_w = column_width("Issues", |r| &r.issues);
     let rel_draft_w = column_width("Rel / Draft", |r| &r.rel_draft);
     let ci_w = column_width("CI", |r| &r.ci);
@@ -758,6 +762,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         if !narrow {
             cells.extend([
                 right(r.prs, Style::default().fg(Color::Magenta)),
+                right(r.review, Style::default().fg(Color::LightMagenta)),
                 right(r.issues, Style::default().fg(Color::Cyan)),
                 right(r.rel_draft, Style::default().fg(Color::Yellow)),
                 right(r.ci, Style::default().fg(r.ci_color)),
@@ -777,12 +782,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if !narrow {
         headings.extend([
             heading("PRs"),
+            heading("Review"),
             heading("Issues"),
             heading("Rel / Draft"),
             heading("CI"),
         ]);
         widths.extend([
             Constraint::Length(prs_w),
+            Constraint::Length(review_w),
             Constraint::Length(issues_w),
             Constraint::Length(rel_draft_w),
             Constraint::Length(ci_w),
@@ -852,10 +859,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 }
                 details.push_str(&items("Remote branches", &row.remote.branches));
             }
-            2 => details.push_str(&items(
-                "Open pull requests (open in browser for head checks)",
-                &row.remote.prs,
-            )),
+            2 => {
+                details.push_str(&items(
+                    "Open pull requests (open in browser for head checks)",
+                    &row.remote.prs,
+                ));
+                details.push_str(&items("Awaiting your review", &row.remote.review_requests));
+            }
             3 => details.push_str(&items("Open issues", &row.remote.issues)),
             4 => {
                 details.push_str(&items("Release proposals", &row.remote.proposals));

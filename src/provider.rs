@@ -28,6 +28,7 @@ impl RemoteProvider for Unsupported {
                 default_branch: Observation::unsupported(),
                 branches: Observation::unsupported(),
                 prs: Observation::unsupported(),
+                review_requests: Observation::unsupported(),
                 issues: Observation::unsupported(),
                 proposals: Observation::unsupported(),
                 drafts: Observation::unsupported(),
@@ -138,6 +139,15 @@ fn issue_item(v: &Value) -> Item {
     }
 }
 
+fn requested_reviewer(v: &Value, login: &str) -> bool {
+    !login.is_empty()
+        && v["requested_reviewers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|u| u["login"].as_str() == Some(login))
+}
+
 fn run_item(v: &Value) -> Item {
     Item {
         title: text(v, "name"),
@@ -169,12 +179,17 @@ impl RemoteProvider for Github {
             let prs_url = format!("{base}/pulls?state=open&per_page=100");
             let issues_url = format!("{base}/issues?state=open&per_page=100");
             let releases_url = format!("{base}/releases?per_page=100");
-            let (branches, prs, issues, releases) = tokio::join!(
+            let (branches, prs, issues, releases, user) = tokio::join!(
                 api(repo, &branches_url, true),
                 api(repo, &prs_url, true),
                 api(repo, &issues_url, true),
-                api(repo, &releases_url, true)
+                api(repo, &releases_url, true),
+                api(repo, "user", false)
             );
+            let login = user
+                .ok()
+                .and_then(|v| v["login"].as_str().map(String::from))
+                .unwrap_or_default();
             state.branches = match branches.and_then(|v| flatten_pages(v, None)) {
                 Ok(rows) => Observation::success(
                     rows.iter()
@@ -201,10 +216,17 @@ impl RemoteProvider for Github {
                             })
                             .collect(),
                     );
+                    state.review_requests = Observation::success(
+                        rows.iter()
+                            .filter(|v| requested_reviewer(v, &login))
+                            .map(pr_item)
+                            .collect(),
+                    );
                 }
                 Err(e) => {
                     state.prs = Observation::failure(&e);
-                    state.proposals = Observation::failure(e);
+                    state.proposals = Observation::failure(&e);
+                    state.review_requests = Observation::failure(e);
                 }
             }
             state.issues = match issues.and_then(|v| flatten_pages(v, None)) {
@@ -356,6 +378,17 @@ mod tests {
         assert_eq!(flatten_pages(json!([[1], [2, 3]]), None).unwrap().len(), 3);
         assert!(flatten_pages(json!([[1], {"message":"denied"}]), None).is_err());
         assert!(flatten_pages(json!({"message":"denied"}), None).is_err());
+    }
+
+    #[test]
+    fn review_requests_match_the_authenticated_login_only() {
+        let pr = json!({
+            "requested_reviewers": [{"login": "octocat"}, {"login": "hubot"}],
+        });
+        assert!(requested_reviewer(&pr, "octocat"));
+        assert!(!requested_reviewer(&pr, "someone-else"));
+        assert!(!requested_reviewer(&pr, ""));
+        assert!(!requested_reviewer(&json!({}), "octocat"));
     }
 
     #[test]
