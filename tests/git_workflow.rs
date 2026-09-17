@@ -89,6 +89,23 @@ async fn pulls_only_registered_checkout_to_previewed_commit() {
 }
 
 #[tokio::test]
+async fn fetch_updates_the_remote_tracking_ref_without_touching_the_working_tree() {
+    let f = Fixture::new();
+    let repo = registry::entry(&f.b, None, None).await.unwrap();
+    f.advance();
+    let before = git_cmd(&f.b, &["rev-parse", "origin/main"]);
+    git::fetch(&repo).await.unwrap();
+    let after = git_cmd(&f.b, &["rev-parse", "origin/main"]);
+    assert_ne!(
+        before, after,
+        "fetch should advance the origin/main tracking ref"
+    );
+    assert_eq!(git_cmd(&f.a, &["rev-parse", "HEAD"]), after);
+    // A fetch never touches the working tree, only tracking refs.
+    assert!(!f.b.join("new.txt").exists());
+}
+
+#[tokio::test]
 async fn dirty_and_changed_previews_are_refused() {
     let f = Fixture::new();
     let repo = registry::entry(&f.b, None, None).await.unwrap();

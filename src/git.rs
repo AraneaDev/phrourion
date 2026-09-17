@@ -190,6 +190,13 @@ fn eligible(s: &LocalState) -> Result<()> {
     Ok(())
 }
 
+// True if the checkout moved to a different commit or branch between two
+// snapshots taken around a fetch — the operation planned against the first
+// snapshot is no longer safe to apply to the second.
+fn changed_during_fetch(initial: &LocalState, before: &LocalState) -> bool {
+    initial.head != before.head || initial.branch != before.branch
+}
+
 async fn tracking(repo: &Repo, branch: &str) -> Result<(String, String)> {
     let remote = run(
         &repo.path,
@@ -219,7 +226,7 @@ pub async fn preview(repo: &Repo) -> Result<PullPreview> {
     run(&repo.path, &["fetch", "--", &tracking_remote]).await?;
     let before = snapshot(repo).await?;
     eligible(&before)?;
-    if initial.head != before.head || initial.branch != before.branch {
+    if changed_during_fetch(&initial, &before) {
         bail!("Checkout changed during fetch; try again");
     }
     if before.behind == 0 {
@@ -290,7 +297,7 @@ pub async fn checkout_preview(repo: &Repo, number: u64) -> Result<CheckoutPrevie
     .await?;
     let before = snapshot(repo).await?;
     checkout_eligible(&before)?;
-    if initial.head != before.head || initial.branch != before.branch {
+    if changed_during_fetch(&initial, &before) {
         bail!("Checkout changed during fetch; try again");
     }
     Ok(CheckoutPreview {
@@ -456,5 +463,37 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn changed_during_fetch_flags_a_moved_head_or_a_switched_branch() {
+        let base = LocalState {
+            head: "abc123".into(),
+            branch: "main".into(),
+            ..LocalState::default()
+        };
+        assert!(!changed_during_fetch(&base, &base));
+        assert!(changed_during_fetch(
+            &base,
+            &LocalState {
+                head: "def456".into(),
+                ..base.clone()
+            }
+        ));
+        assert!(changed_during_fetch(
+            &base,
+            &LocalState {
+                branch: "other".into(),
+                ..base.clone()
+            }
+        ));
+        assert!(changed_during_fetch(
+            &base,
+            &LocalState {
+                head: "def456".into(),
+                branch: "other".into(),
+                ..base.clone()
+            }
+        ));
     }
 }
