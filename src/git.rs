@@ -425,4 +425,36 @@ mod tests {
         assert_eq!(with_upstream(0, 1).sync(), "behind 1");
         assert_eq!(with_upstream(1, 1).sync(), "diverged +1 -1");
     }
+
+    #[test]
+    fn eligible_refuses_only_when_both_ahead_and_behind_are_nonzero() {
+        let base = LocalState {
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            ..LocalState::default()
+        };
+        assert!(eligible(&base).is_ok());
+        assert!(
+            eligible(&LocalState {
+                ahead: 1,
+                ..base.clone()
+            })
+            .is_ok()
+        );
+        assert!(
+            eligible(&LocalState {
+                behind: 1,
+                ..base.clone()
+            })
+            .is_ok()
+        );
+        assert!(
+            eligible(&LocalState {
+                ahead: 1,
+                behind: 1,
+                ..base
+            })
+            .is_err()
+        );
+    }
 }
