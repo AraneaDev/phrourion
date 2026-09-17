@@ -78,6 +78,30 @@ Issues support sees real use), and any comment/close/merge action from the TUI
 Deliberately dropped this round: repo groups/tags — premature until someone's
 registry is large enough to need grouping.
 
+## UI polish
+
+- **Stop showing "unknown" for data that's actually known** — every remote
+  column showed the word "unknown" on startup whenever the disk cache held
+  real backfilled data behind the synthetic "Cached; awaiting refresh"
+  placeholder `cached()` attaches before this session's own fetch resolves
+  each field, because `count()`/`ci_label()` checked the placeholder error
+  before checking whether data was actually present. *Shipped* — a shared
+  `cell_state()` classifier (Data / Loading / Error / Unsupported) now makes
+  real data win whenever it's present; terse glyphs (`…` loading, `!` error,
+  `n/a` unsupported) replace the repeated word; `health_glyph()` had the same
+  bug independently (every row rendered as fully errored regardless of
+  whether the backfilled data was actually healthy) and got the same fix.
+  `attention()`/`triage()`'s failure count needed a separate, stricter
+  `ci_failed_confirmed()` check so a stale-but-backfilled CI failure still
+  doesn't count as a confirmed attention signal, per this doc's own stated
+  design principle.
+- **Visual pass** — real-but-empty counts (`0`) now render muted instead of
+  in the column's full accent color, so only a nonzero, actionable count
+  draws the eye; the Attention column is now color-coded by priority
+  (red/yellow) instead of always rendering in the default color; the three
+  panel borders (Triage, Checkouts, State) are now a consistent subtle
+  DarkGray instead of an unexplained mix of brighter/dimmer borders. *Shipped.*
+
 ## Reliability
 
 - **Rate-limit-aware backoff for `gh api`** — detect GitHub 403/429 responses
