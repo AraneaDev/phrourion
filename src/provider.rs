@@ -412,6 +412,79 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // Rust's test harness runs different #[test]/#[tokio::test] fns
+    // concurrently on separate threads by default, but PHROURION_GH is
+    // process-global. Every test below that sets it holds this lock for
+    // its whole body so no two such tests interleave.
+    static GH_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn test_repo() -> Repo {
+        Repo {
+            id: "t".into(),
+            name: "t".into(),
+            path: std::env::temp_dir(),
+            remote: "origin".into(),
+            identity: crate::model::Remote {
+                kind: ProviderKind::Github,
+                host: "example.com".into(),
+                project: "org/repo".into(),
+            },
+            enabled: true,
+            release_workflows: vec![],
+            release_labels: vec![],
+            issue_labels: vec![],
+        }
+    }
+
+    fn write_executable(dir: &std::path::Path, name: &str, contents: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        path
+    }
+
+    // A fake `gh` for testing api()/Github::snapshot() without a real
+    // network call or a `gh` installation. api()'s args are always
+    // `api --hostname HOST --method GET ENDPOINT [--paginate --slurp]`,
+    // so the endpoint is always positional arg $6. `overrides` maps an
+    // endpoint substring to the raw JSON gh would print for it; anything
+    // else gets an empty page (`[[]]` for --paginate --slurp calls, `{}`
+    // otherwise) so the rest of snapshot()'s concurrent calls succeed
+    // harmlessly instead of hanging or failing the whole snapshot.
+    fn fake_gh(dir: &std::path::Path, overrides: &[(&str, &str)]) -> std::path::PathBuf {
+        let mut script = String::from("#!/bin/sh\nendpoint=\"$6\"\ncase \"$endpoint\" in\n");
+        for (pattern, body) in overrides {
+            script.push_str(&format!("  *{pattern}*) printf '%s' '{body}' ;;\n"));
+        }
+        script.push_str(
+            "  *) if [ \"$7\" = \"--paginate\" ]; then printf '%s' '[[]]'; else printf '%s' '{}'; fi ;;\n",
+        );
+        script.push_str("esac\n");
+        write_executable(dir, "fake-gh", &script)
+    }
+
+    // Caller must hold GH_ENV_LOCK for the duration of this call.
+    async fn with_fake_gh<T>(gh: &std::path::Path, fut: impl std::future::Future<Output = T>) -> T {
+        let previous = std::env::var("PHROURION_GH").ok();
+        unsafe {
+            std::env::set_var("PHROURION_GH", gh);
+        }
+        let result = fut.await;
+        unsafe {
+            match &previous {
+                Some(v) => std::env::set_var("PHROURION_GH", v),
+                None => std::env::remove_var("PHROURION_GH"),
+            }
+        }
+        result
+    }
+
     #[test]
     fn pagination_requires_every_page_to_have_expected_shape() {
         assert_eq!(flatten_pages(json!([[1], [2, 3]]), None).unwrap().len(), 3);
@@ -565,22 +638,9 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_dispatches_github_and_forgejo_and_falls_back_to_unsupported() {
-        let _guard = crate::test_support::FORGEJO_ENV_LOCK.lock().await;
-        let repo = Repo {
-            id: "t".into(),
-            name: "t".into(),
-            path: std::env::temp_dir(),
-            remote: "origin".into(),
-            identity: crate::model::Remote {
-                kind: ProviderKind::Github,
-                host: "provider-test".into(),
-                project: "o/r".into(),
-            },
-            enabled: true,
-            release_workflows: vec![],
-            release_labels: vec![],
-            issue_labels: vec![],
-        };
+        let _forgejo_guard = crate::test_support::FORGEJO_ENV_LOCK.lock().await;
+        let _gh_guard = GH_ENV_LOCK.lock().await;
+        let repo = test_repo();
 
         // Force a fast, deterministic failure instead of depending on
         // whether a real `gh` is installed or reachable in this environment.
@@ -632,5 +692,132 @@ mod tests {
 
         assert!(forgejo_state.default_branch.supported);
         assert!(forgejo_state.default_branch.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn api_retries_on_a_rate_limited_error_then_succeeds() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("count");
+        let script = format!(
+            "#!/bin/sh\n\
+             n=$(cat '{counter}' 2>/dev/null || echo 0)\n\
+             n=$((n+1))\n\
+             echo \"$n\" > '{counter}'\n\
+             if [ \"$n\" -lt 2 ]; then\n\
+             \x20 echo 'secondary rate limit exceeded' >&2\n\
+             \x20 exit 1\n\
+             fi\n\
+             printf '%s' '{{\"ok\":true}}'\n",
+            counter = counter.display()
+        );
+        let gh = write_executable(dir.path(), "fake-gh-retry", &script);
+        let repo = test_repo();
+        let value = with_fake_gh(&gh, api(&repo, "some/endpoint", false))
+            .await
+            .expect("should succeed after one retry");
+        assert_eq!(value["ok"], true);
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            "2",
+            "expected exactly one retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_gives_up_after_exhausting_rate_limit_retries() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("count");
+        let script = format!(
+            "#!/bin/sh\n\
+             n=$(cat '{counter}' 2>/dev/null || echo 0)\n\
+             n=$((n+1))\n\
+             echo \"$n\" > '{counter}'\n\
+             echo 'secondary rate limit exceeded' >&2\n\
+             exit 1\n",
+            counter = counter.display()
+        );
+        let gh = write_executable(dir.path(), "fake-gh-exhaust", &script);
+        let repo = test_repo();
+        let result = with_fake_gh(&gh, api(&repo, "some/endpoint", false)).await;
+        assert!(result.is_err());
+        // RATE_LIMIT_ATTEMPTS = 3: exactly 3 attempts — neither a premature
+        // give-up nor an infinite retry loop.
+        assert_eq!(std::fs::read_to_string(&counter).unwrap().trim(), "3");
+    }
+
+    #[tokio::test]
+    async fn github_snapshot_splits_releases_into_drafts_and_published() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            &[(
+                "releases",
+                r#"[[{"tag_name":"v1-draft","draft":true,"html_url":"u1","published_at":""},{"tag_name":"v2-published","draft":false,"html_url":"u2","published_at":"2024-01-01"}]]"#,
+            )],
+        );
+        let repo = test_repo();
+        let state = with_fake_gh(&gh, Github.snapshot(&repo)).await;
+
+        let drafts = state.drafts.data.expect("drafts should be populated");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].title, "v1-draft");
+
+        let published = state.published.data.expect("published should be populated");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].title, "v2-published");
+    }
+
+    #[tokio::test]
+    async fn github_snapshot_filters_pull_requests_out_of_issues() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            &[(
+                "issues",
+                r#"[[{"number":1,"title":"real issue","html_url":"u1","labels":[]},{"number":2,"title":"a pr shaped like an issue","html_url":"u2","labels":[],"pull_request":{}}]]"#,
+            )],
+        );
+        let repo = test_repo();
+        let state = with_fake_gh(&gh, Github.snapshot(&repo)).await;
+
+        let issues = state.issues.data.expect("issues should be populated");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].title.contains("real issue"));
+    }
+
+    #[tokio::test]
+    async fn github_snapshot_publication_retains_every_running_attempt_plus_latest_completed() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            &[(
+                "actions/workflows",
+                r#"[{"workflow_runs":[
+                    {"name":"r1","html_url":"u1","status":"in_progress","conclusion":"","head_sha":"s1"},
+                    {"name":"r2","html_url":"u2","status":"completed","conclusion":"success","head_sha":"s2"},
+                    {"name":"r3","html_url":"u3","status":"completed","conclusion":"failure","head_sha":"s3"}
+                ]}]"#,
+            )],
+        );
+        let mut repo = test_repo();
+        repo.release_workflows = vec!["ci.yml".into()];
+        let state = with_fake_gh(&gh, Github.snapshot(&repo)).await;
+
+        let items = state
+            .publication
+            .data
+            .expect("publication should be populated");
+        assert_eq!(
+            items.len(),
+            2,
+            "should keep the running run plus only the latest completed one"
+        );
+        assert_eq!(items[0].title, "r1");
+        assert_eq!(items[1].title, "r2");
     }
 }
