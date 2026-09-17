@@ -422,6 +422,37 @@ fn state_color(cell: CellState, data_color: Color) -> Color {
     }
 }
 
+// A real-but-empty count ("0") is calm, informational data, not something
+// worth the column's accent color — only a nonzero, actionable count earns
+// it. Combines two observations (e.g. proposals + drafts) by taking the
+// more attention-worthy of the two states first.
+fn count_color<T>(value: &Observation<Vec<T>>, accent: Color) -> Color {
+    match cell_state(value) {
+        CellState::Data if value.data.as_ref().is_some_and(|v| !v.is_empty()) => accent,
+        CellState::Data => Color::DarkGray,
+        other => state_color(other, accent),
+    }
+}
+
+fn count_color_combined<T, U>(
+    a: &Observation<Vec<T>>,
+    b: &Observation<Vec<U>>,
+    accent: Color,
+) -> Color {
+    match worse_state(cell_state(a), cell_state(b)) {
+        CellState::Data => {
+            let any_nonempty = a.data.as_ref().is_some_and(|v| !v.is_empty())
+                || b.data.as_ref().is_some_and(|v| !v.is_empty());
+            if any_nonempty {
+                accent
+            } else {
+                Color::DarkGray
+            }
+        }
+        other => state_color(other, accent),
+    }
+}
+
 fn count<T>(value: &Observation<Vec<T>>) -> String {
     match cell_state(value) {
         CellState::Unsupported => "n/a".into(),
@@ -839,13 +870,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 "!" => Color::Red,
                 _ => Color::DarkGray, // "n/a", "…", "absent", "other"
             };
-            let rel_draft_color = state_color(
-                worse_state(
-                    cell_state(&r.remote.proposals),
-                    cell_state(&r.remote.drafts),
-                ),
-                Color::Yellow,
-            );
+            let rel_draft_color =
+                count_color_combined(&r.remote.proposals, &r.remote.drafts, Color::Yellow);
             RowText {
                 repo_label: format!("{} {}", health_glyph(r), clean(&r.repo.name)),
                 attention: r.attention().1,
@@ -853,14 +879,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 local,
                 sync,
                 prs: count(&r.remote.prs),
-                prs_color: state_color(cell_state(&r.remote.prs), Color::Magenta),
+                prs_color: count_color(&r.remote.prs, Color::Magenta),
                 review: count(&r.remote.review_requests),
-                review_color: state_color(
-                    cell_state(&r.remote.review_requests),
-                    Color::LightMagenta,
-                ),
+                review_color: count_color(&r.remote.review_requests, Color::LightMagenta),
                 issues: count(&r.remote.issues),
-                issues_color: state_color(cell_state(&r.remote.issues), Color::Cyan),
+                issues_color: count_color(&r.remote.issues, Color::Cyan),
                 rel_draft: format!(
                     "{} / {}",
                     count(&r.remote.proposals),
@@ -1800,6 +1823,48 @@ mod tests {
             Color::DarkGray
         );
         assert_eq!(state_color(CellState::Error, Color::Magenta), Color::Red);
+    }
+
+    #[test]
+    fn count_color_mutes_a_real_zero_and_accents_a_nonzero_count() {
+        let empty: Observation<Vec<String>> = Observation::success(vec![]);
+        assert_eq!(count_color(&empty, Color::Magenta), Color::DarkGray);
+
+        let nonempty: Observation<Vec<String>> = Observation::success(vec!["x".into()]);
+        assert_eq!(count_color(&nonempty, Color::Magenta), Color::Magenta);
+
+        let errored: Observation<Vec<String>> = Observation::failure("denied");
+        assert_eq!(count_color(&errored, Color::Magenta), Color::Red);
+
+        let loading: Observation<Vec<String>> = Observation::default();
+        assert_eq!(count_color(&loading, Color::Magenta), Color::DarkGray);
+    }
+
+    #[test]
+    fn count_color_combined_accents_if_either_side_is_nonempty() {
+        let empty: Observation<Vec<String>> = Observation::success(vec![]);
+        let nonempty: Observation<Vec<String>> = Observation::success(vec!["x".into()]);
+
+        assert_eq!(
+            count_color_combined(&empty, &empty, Color::Yellow),
+            Color::DarkGray
+        );
+        assert_eq!(
+            count_color_combined(&nonempty, &empty, Color::Yellow),
+            Color::Yellow
+        );
+        assert_eq!(
+            count_color_combined(&empty, &nonempty, Color::Yellow),
+            Color::Yellow
+        );
+
+        // An error on either side is more attention-worthy than empty data
+        // on the other, so it wins per worse_state's ranking.
+        let errored: Observation<Vec<String>> = Observation::failure("denied");
+        assert_eq!(
+            count_color_combined(&errored, &empty, Color::Yellow),
+            Color::Red
+        );
     }
 
     #[test]
