@@ -1,0 +1,16 @@
+# Dev-only fixture for testing the Forgejo adapter locally. Not part of the
+# shipped crate. Start with scripts/forgejo-dev.sh, not directly.
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:7
+    container_name: phrourion-forgejo
+    environment:
+      - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__server__ROOT_URL=http://localhost:3000/
+    ports:
+      - "3000:3000"
+    volumes:
+      - phrourion-forgejo-data:/data
+
+volumes:
+  phrourion-forgejo-data:
