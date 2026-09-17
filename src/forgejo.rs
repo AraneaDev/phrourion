@@ -368,6 +368,58 @@ mod tests {
         (format!("http://{addr}"), rx)
     }
 
+    // Like serve_mock, but for callers that fire several requests
+    // concurrently (e.g. Forgejo::snapshot()'s tokio::join!): spawns a
+    // fresh thread per accepted connection and routes each one by matching
+    // `pattern` against the request's first line (method + path + query),
+    // so response order doesn't need to match request order. Any path that
+    // matches no route gets `[]` (a harmless empty page/object). Runs for
+    // the rest of the process, so no response count needs to be known
+    // upfront.
+    fn serve_routed_mock(routes: Vec<(&'static str, String)>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let routes = std::sync::Arc::new(routes);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let routes = routes.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 8192];
+                    let mut request = Vec::new();
+                    loop {
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let request_line = String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    let body = routes
+                        .iter()
+                        .find(|(pattern, _)| request_line.contains(pattern))
+                        .map(|(_, body)| body.as_str())
+                        .unwrap_or("[]");
+                    let payload = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(payload.as_bytes());
+                    let _ = stream.flush();
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     // Caller must hold ENV_LOCK for the duration of this call. Awaits `fut`
     // (not merely constructs it) before restoring the previous value, so the
     // override is actually in effect while the request runs.
@@ -613,5 +665,38 @@ mod tests {
                 None => std::env::remove_var("PHROURION_FORGEJO_TEST_URL"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn forgejo_snapshot_splits_releases_into_drafts_and_published() {
+        let _guard = ENV_LOCK.lock().await;
+        let base = serve_routed_mock(vec![(
+            "/releases",
+            r#"[{"tag_name":"v1-draft","draft":true,"html_url":"u1","published_at":""},{"tag_name":"v2-published","draft":false,"html_url":"u2","published_at":"2024-01-01"}]"#.into(),
+        )]);
+        let repo = crate::model::Repo {
+            id: "t".into(),
+            name: "t".into(),
+            path: std::env::temp_dir(),
+            remote: "origin".into(),
+            identity: crate::model::Remote {
+                kind: crate::model::ProviderKind::Forgejo,
+                host: "mock".into(),
+                project: "org/repo".into(),
+            },
+            enabled: true,
+            release_workflows: vec![],
+            release_labels: vec![],
+            issue_labels: vec![],
+        };
+        let state = with_test_url(&base, Forgejo.snapshot(&repo)).await;
+
+        let drafts = state.drafts.data.expect("drafts should be populated");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].title, "v1-draft");
+
+        let published = state.published.data.expect("published should be populated");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].title, "v2-published");
     }
 }
