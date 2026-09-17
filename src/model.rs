@@ -155,3 +155,45 @@ pub fn clean(text: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_enabled_defaults_to_true() {
+        assert!(enabled());
+    }
+
+    #[test]
+    fn label_distinguishes_unsupported_stale_error_fresh_and_loading() {
+        let unsupported: Observation<()> = Observation::unsupported();
+        assert_eq!(unsupported.label(), "unsupported");
+
+        // Backfilled by retain_previous: a real prior fetch (observed set)
+        // whose current attempt errored (error set too).
+        let stale = Observation::<()> {
+            data: None,
+            observed: Some(now()),
+            error: Some("boom".into()),
+            supported: true,
+        };
+        assert!(stale.label().starts_with("stale "));
+        assert!(stale.label().ends_with('s'));
+
+        // Never had a successful fetch, only ever errored.
+        let error_only = Observation::<()> {
+            data: None,
+            observed: None,
+            error: Some("boom".into()),
+            supported: true,
+        };
+        assert_eq!(error_only.label(), "error");
+
+        let fresh: Observation<()> = Observation::success(());
+        assert!(fresh.label().ends_with("s ago"));
+
+        let loading: Observation<()> = Observation::default();
+        assert_eq!(loading.label(), "loading");
+    }
+}

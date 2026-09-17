@@ -493,4 +493,93 @@ mod tests {
             Some("candidate: title only")
         );
     }
+
+    #[test]
+    fn release_evidence_detects_the_autorelease_pending_label() {
+        assert_eq!(
+            release_evidence(&json!({"labels":[{"name":"autorelease: pending"}]}), &[]).as_deref(),
+            Some("release label")
+        );
+    }
+
+    #[test]
+    fn release_evidence_detects_a_caller_configured_release_label_but_not_an_unrelated_one() {
+        let labels = ["needs-release".to_string()];
+        assert_eq!(
+            release_evidence(&json!({"labels":[{"name":"needs-release"}]}), &labels).as_deref(),
+            Some("release label")
+        );
+        assert!(release_evidence(&json!({"labels":[{"name":"unrelated"}]}), &labels).is_none());
+    }
+
+    #[tokio::test]
+    async fn adapter_dispatches_github_and_forgejo_and_falls_back_to_unsupported() {
+        let _guard = crate::test_support::FORGEJO_ENV_LOCK.lock().await;
+        let repo = Repo {
+            id: "t".into(),
+            name: "t".into(),
+            path: std::env::temp_dir(),
+            remote: "origin".into(),
+            identity: crate::model::Remote {
+                kind: ProviderKind::Github,
+                host: "provider-test".into(),
+                project: "o/r".into(),
+            },
+            enabled: true,
+            release_workflows: vec![],
+            release_labels: vec![],
+            issue_labels: vec![],
+        };
+
+        // Force a fast, deterministic failure instead of depending on
+        // whether a real `gh` is installed or reachable in this environment.
+        let previous_gh = std::env::var("PHROURION_GH").ok();
+        unsafe {
+            std::env::set_var("PHROURION_GH", "/nonexistent/phrourion-test-gh-binary");
+        }
+        let github_state = adapter(&ProviderKind::Github).snapshot(&repo).await;
+        unsafe {
+            match &previous_gh {
+                Some(v) => std::env::set_var("PHROURION_GH", v),
+                None => std::env::remove_var("PHROURION_GH"),
+            }
+        }
+
+        let previous_url = std::env::var("PHROURION_FORGEJO_TEST_URL").ok();
+        unsafe {
+            // Nothing listens on this local port: an instant, network- and
+            // DNS-independent connection refusal (it's a literal IP).
+            std::env::set_var("PHROURION_FORGEJO_TEST_URL", "http://127.0.0.1:1");
+        }
+        let forgejo_state = adapter(&ProviderKind::Forgejo).snapshot(&repo).await;
+        unsafe {
+            match &previous_url {
+                Some(v) => std::env::set_var("PHROURION_FORGEJO_TEST_URL", v),
+                None => std::env::remove_var("PHROURION_FORGEJO_TEST_URL"),
+            }
+        }
+
+        let unsupported_state = adapter(&ProviderKind::Local).snapshot(&repo).await;
+
+        // Unsupported never attempts anything: every field is the disabled
+        // placeholder, not an error.
+        assert!(!unsupported_state.default_branch.supported);
+
+        // Github attempted (and failed to even start) a real call — a
+        // *supported* feature that errored, observably distinct both from
+        // "feature disabled" and from api()'s own success path.
+        let github_error = github_state
+            .default_branch
+            .error
+            .clone()
+            .unwrap_or_default();
+        assert!(github_state.default_branch.supported);
+        assert!(
+            github_error.contains("Cannot start"),
+            "expected a process-spawn failure, got: {github_error}"
+        );
+
+        assert!(forgejo_state.default_branch.supported);
+        assert!(forgejo_state.default_branch.error.is_some());
+    }
 }

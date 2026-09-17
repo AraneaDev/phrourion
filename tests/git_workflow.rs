@@ -204,6 +204,31 @@ async fn renamed_files_and_untracked_names_do_not_confuse_status_parser() {
 }
 
 #[tokio::test]
+async fn staged_and_unstaged_modifications_are_counted_independently() {
+    let f = Fixture::new();
+    std::fs::write(f.b.join("tracked.txt"), "original").unwrap();
+    git_cmd(&f.b, &["add", "tracked.txt"]);
+    git_cmd(&f.b, &["commit", "-m", "add tracked file"]);
+    git_cmd(&f.b, &["push"]);
+    let repo = registry::entry(&f.b, None, None).await.unwrap();
+
+    // A change staged with `git add` but not yet touched again in the
+    // working tree: staged, not modified.
+    std::fs::write(f.b.join("tracked.txt"), "staged change").unwrap();
+    git_cmd(&f.b, &["add", "tracked.txt"]);
+    let state = git::snapshot(&repo).await.unwrap();
+    assert_eq!(state.staged, 1);
+    assert_eq!(state.modified, 0);
+
+    // The same file edited again without re-staging: both staged (from the
+    // prior `add`) and modified (the new, unstaged edit).
+    std::fs::write(f.b.join("tracked.txt"), "unstaged change").unwrap();
+    let state = git::snapshot(&repo).await.unwrap();
+    assert_eq!(state.staged, 1);
+    assert_eq!(state.modified, 1);
+}
+
+#[tokio::test]
 async fn checkout_fetches_pr_head_into_a_new_local_branch() {
     let f = Fixture::new();
     let repo = registry::entry(&f.b, None, None).await.unwrap();

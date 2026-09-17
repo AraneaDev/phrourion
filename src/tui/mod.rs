@@ -589,4 +589,35 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn centered_text_starts_at_the_expected_column() {
+        // SCENE_WIDTH (40) - "P H R O U R I O N".len() (17) = 23, halved
+        // and truncated by integer division: 11. Hardcoded rather than
+        // recomputed with the same formula, so a wrong operator in
+        // `centered()` actually changes the expected value here too.
+        let scene = startup_scene(0);
+        let title_line = scene.lines().next().unwrap();
+        let leading_spaces = title_line.chars().take_while(|&c| c == ' ').count();
+        assert_eq!(leading_spaces, 11, "line: {title_line:?}");
+        assert!(title_line[11..].starts_with("P H R O U R I O N"));
+    }
+
+    #[test]
+    fn exiting_guard_moves_through_each_expected_position() {
+        let position = |frame: usize| {
+            let scene = exit_scene(frame);
+            for (y, line) in scene.lines().enumerate() {
+                if let Some(x) = line.find(" o ") {
+                    return (x, y);
+                }
+            }
+            panic!("guard not found in exiting scene frame {frame}: {scene}");
+        };
+        assert_eq!(position(0), (18, 5));
+        assert_eq!(position(1), (18, 7));
+        assert_eq!(position(2), (24, 9));
+        assert_eq!(position(3), (29, 9));
+        assert_eq!(position(4), (34, 9));
+    }
 }

@@ -373,3 +373,56 @@ pub async fn apply(preview: &PullPreview) -> Result<String> {
         output
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirty_is_true_when_any_single_field_is_nonzero() {
+        assert!(!LocalState::default().dirty());
+        assert!(
+            LocalState {
+                staged: 1,
+                ..LocalState::default()
+            }
+            .dirty()
+        );
+        assert!(
+            LocalState {
+                modified: 1,
+                ..LocalState::default()
+            }
+            .dirty()
+        );
+        assert!(
+            LocalState {
+                untracked: 1,
+                ..LocalState::default()
+            }
+            .dirty()
+        );
+        assert!(
+            LocalState {
+                conflicts: 1,
+                ..LocalState::default()
+            }
+            .dirty()
+        );
+    }
+
+    #[test]
+    fn sync_reports_no_upstream_before_diverged_ahead_behind_or_current() {
+        assert_eq!(LocalState::default().sync(), "no upstream");
+        let with_upstream = |ahead, behind| LocalState {
+            upstream: "origin/main".into(),
+            ahead,
+            behind,
+            ..LocalState::default()
+        };
+        assert_eq!(with_upstream(0, 0).sync(), "current");
+        assert_eq!(with_upstream(1, 0).sync(), "ahead 1");
+        assert_eq!(with_upstream(0, 1).sync(), "behind 1");
+        assert_eq!(with_upstream(1, 1).sync(), "diverged +1 -1");
+    }
+}
