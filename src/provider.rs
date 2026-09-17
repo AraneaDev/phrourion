@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, time::Duration};
 
 pub type SnapshotFuture<'a> = Pin<Box<dyn Future<Output = RemoteState> + Send + 'a>>;
 
@@ -28,6 +28,8 @@ impl RemoteProvider for Unsupported {
                 default_branch: Observation::unsupported(),
                 branches: Observation::unsupported(),
                 prs: Observation::unsupported(),
+                review_requests: Observation::unsupported(),
+                issues: Observation::unsupported(),
                 proposals: Observation::unsupported(),
                 drafts: Observation::unsupported(),
                 published: Observation::unsupported(),
@@ -39,6 +41,16 @@ impl RemoteProvider for Unsupported {
 }
 
 pub struct Github;
+
+const RATE_LIMIT_ATTEMPTS: u32 = 3;
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
+
+// gh reports both primary and secondary rate limits as plain text on stderr, no
+// structured status; matching a substring is the only signal command::run exposes.
+fn is_rate_limited(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("rate limit") || lower.contains("http 429")
+}
 
 async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
     let executable = std::env::var("PHROURION_GH").unwrap_or_else(|_| "gh".into());
@@ -53,8 +65,19 @@ async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
     if pages {
         args.extend(["--paginate", "--slurp"]);
     }
-    let text = command::run(&executable, &args, &repo.path).await?;
-    serde_json::from_str(&text).context("Invalid provider JSON")
+    let mut backoff = RATE_LIMIT_BACKOFF;
+    let mut attempts_left = RATE_LIMIT_ATTEMPTS;
+    loop {
+        attempts_left -= 1;
+        match command::run(&executable, &args, &repo.path).await {
+            Ok(text) => return serde_json::from_str(&text).context("Invalid provider JSON"),
+            Err(e) if attempts_left > 0 && is_rate_limited(&e.to_string()) => {
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub fn flatten_pages(value: Value, key: Option<&str>) -> Result<Vec<Value>> {
@@ -118,6 +141,47 @@ fn pr_item(v: &Value) -> Item {
     }
 }
 
+// GitHub's issues endpoint also returns pull requests; only the latter carry this key.
+fn is_pull_request(v: &Value) -> bool {
+    !v["pull_request"].is_null()
+}
+
+// An empty filter list means unfiltered; otherwise the issue must carry at least one.
+fn matches_issue_labels(v: &Value, labels: &[String]) -> bool {
+    if labels.is_empty() {
+        return true;
+    }
+    v["labels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l["name"].as_str())
+        .any(|n| labels.iter().any(|x| x == n))
+}
+
+fn issue_item(v: &Value) -> Item {
+    Item {
+        title: format!("#{} {}", v["number"], text(v, "title")),
+        url: text(v, "html_url"),
+        detail: v["labels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|l| l["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+fn requested_reviewer(v: &Value, login: &str) -> bool {
+    !login.is_empty()
+        && v["requested_reviewers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|u| u["login"].as_str() == Some(login))
+}
+
 fn run_item(v: &Value) -> Item {
     Item {
         title: text(v, "name"),
@@ -147,12 +211,19 @@ impl RemoteProvider for Github {
             }
             let branches_url = format!("{base}/branches?per_page=100");
             let prs_url = format!("{base}/pulls?state=open&per_page=100");
+            let issues_url = format!("{base}/issues?state=open&per_page=100");
             let releases_url = format!("{base}/releases?per_page=100");
-            let (branches, prs, releases) = tokio::join!(
+            let (branches, prs, issues, releases, user) = tokio::join!(
                 api(repo, &branches_url, true),
                 api(repo, &prs_url, true),
-                api(repo, &releases_url, true)
+                api(repo, &issues_url, true),
+                api(repo, &releases_url, true),
+                api(repo, "user", false)
             );
+            let login = user
+                .ok()
+                .and_then(|v| v["login"].as_str().map(String::from))
+                .unwrap_or_default();
             state.branches = match branches.and_then(|v| flatten_pages(v, None)) {
                 Ok(rows) => Observation::success(
                     rows.iter()
@@ -179,12 +250,29 @@ impl RemoteProvider for Github {
                             })
                             .collect(),
                     );
+                    state.review_requests = Observation::success(
+                        rows.iter()
+                            .filter(|v| requested_reviewer(v, &login))
+                            .map(pr_item)
+                            .collect(),
+                    );
                 }
                 Err(e) => {
                     state.prs = Observation::failure(&e);
-                    state.proposals = Observation::failure(e);
+                    state.proposals = Observation::failure(&e);
+                    state.review_requests = Observation::failure(e);
                 }
             }
+            state.issues = match issues.and_then(|v| flatten_pages(v, None)) {
+                Ok(rows) => Observation::success(
+                    rows.iter()
+                        .filter(|v| !is_pull_request(v))
+                        .filter(|v| matches_issue_labels(v, &repo.issue_labels))
+                        .map(issue_item)
+                        .collect(),
+                ),
+                Err(e) => Observation::failure(e),
+            };
             match releases.and_then(|v| flatten_pages(v, None)) {
                 Ok(rows) => {
                     let item = |v: &Value| Item {
@@ -325,6 +413,64 @@ mod tests {
         assert_eq!(flatten_pages(json!([[1], [2, 3]]), None).unwrap().len(), 3);
         assert!(flatten_pages(json!([[1], {"message":"denied"}]), None).is_err());
         assert!(flatten_pages(json!({"message":"denied"}), None).is_err());
+    }
+
+    #[test]
+    fn rate_limit_detection_matches_ghs_stderr_phrasing_only() {
+        assert!(is_rate_limited(
+            "gh: API rate limit exceeded for user ID 123. (HTTP 403)"
+        ));
+        assert!(is_rate_limited(
+            "gh: You have exceeded a secondary rate limit. (HTTP 403)"
+        ));
+        assert!(is_rate_limited("gh: (HTTP 429)"));
+        assert!(!is_rate_limited("gh: Not Found (HTTP 404)"));
+        assert!(!is_rate_limited("gh: Bad credentials (HTTP 401)"));
+    }
+
+    #[test]
+    fn review_requests_match_the_authenticated_login_only() {
+        let pr = json!({
+            "requested_reviewers": [{"login": "octocat"}, {"login": "hubot"}],
+        });
+        assert!(requested_reviewer(&pr, "octocat"));
+        assert!(!requested_reviewer(&pr, "someone-else"));
+        assert!(!requested_reviewer(&pr, ""));
+        assert!(!requested_reviewer(&json!({}), "octocat"));
+    }
+
+    #[test]
+    fn issue_label_filter_is_permissive_when_empty_and_an_any_match_otherwise() {
+        let issue = json!({"labels": [{"name": "bug"}, {"name": "triage"}]});
+        assert!(matches_issue_labels(&issue, &[]));
+        assert!(matches_issue_labels(&issue, &["bug".into()]));
+        assert!(matches_issue_labels(
+            &issue,
+            &["unrelated".into(), "triage".into()]
+        ));
+        assert!(!matches_issue_labels(&issue, &["unrelated".into()]));
+        assert!(!matches_issue_labels(&json!({}), &["bug".into()]));
+    }
+
+    #[test]
+    fn issue_listing_excludes_pull_requests_and_joins_labels() {
+        let issue = json!({
+            "number": 42,
+            "title": "Crash on empty registry",
+            "html_url": "https://github.com/o/r/issues/42",
+            "labels": [{"name": "bug"}, {"name": "triage"}],
+        });
+        let pr = json!({
+            "number": 43,
+            "title": "Fix crash",
+            "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/43"},
+        });
+        assert!(!is_pull_request(&issue));
+        assert!(is_pull_request(&pr));
+        let item = issue_item(&issue);
+        assert_eq!(item.title, "#42 Crash on empty registry");
+        assert_eq!(item.url, "https://github.com/o/r/issues/42");
+        assert_eq!(item.detail, "bug, triage");
     }
 
     #[test]

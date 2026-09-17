@@ -149,6 +149,7 @@ pub async fn entry(path: &Path, remote: Option<&str>, kind: Option<ProviderKind>
         enabled: true,
         release_workflows: Vec::new(),
         release_labels: Vec::new(),
+        issue_labels: Vec::new(),
     })
 }
 

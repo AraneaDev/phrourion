@@ -32,6 +32,8 @@ pub struct Repo {
     pub release_workflows: Vec<String>,
     #[serde(default)]
     pub release_labels: Vec<String>,
+    #[serde(default)]
+    pub issue_labels: Vec<String>,
 }
 
 fn enabled() -> bool {
@@ -113,6 +115,8 @@ pub struct RemoteState {
     pub default_branch: Observation<String>,
     pub branches: Observation<Vec<Item>>,
     pub prs: Observation<Vec<Item>>,
+    pub review_requests: Observation<Vec<Item>>,
+    pub issues: Observation<Vec<Item>>,
     pub proposals: Observation<Vec<Item>>,
     pub drafts: Observation<Vec<Item>>,
     pub published: Observation<Vec<Item>>,
@@ -126,6 +130,8 @@ impl RemoteState {
             default_branch: self.default_branch.retain_previous(&old.default_branch),
             branches: self.branches.retain_previous(&old.branches),
             prs: self.prs.retain_previous(&old.prs),
+            review_requests: self.review_requests.retain_previous(&old.review_requests),
+            issues: self.issues.retain_previous(&old.issues),
             proposals: self.proposals.retain_previous(&old.proposals),
             drafts: self.drafts.retain_previous(&old.drafts),
             published: self.published.retain_previous(&old.published),

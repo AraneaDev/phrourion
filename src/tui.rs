@@ -1,5 +1,5 @@
 use crate::{
-    git::{self, LocalState, PullPreview},
+    git::{self, CheckoutPreview, LocalState, PullPreview},
     model::{Observation, RemoteState, Repo, clean},
     provider, registry,
 };
@@ -37,11 +37,56 @@ pub struct RowState {
     pub failures: u32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AttentionPriority {
+    Problem,
+    Pending,
+    LocalWork,
+    Quiet,
+}
+
+impl RowState {
+    fn attention(&self) -> (AttentionPriority, String) {
+        use AttentionPriority::*;
+        let local = self
+            .local
+            .data
+            .as_ref()
+            .filter(|_| self.local.supported && self.local.error.is_none());
+        if local.is_some_and(|s| s.conflicts > 0) {
+            return (Problem, "Conflicts".into());
+        }
+        if local.is_some_and(|s| !s.upstream.is_empty() && s.ahead > 0 && s.behind > 0) {
+            return (Problem, "Diverged".into());
+        }
+        if ci_label(&self.remote) == "fail" {
+            return (Problem, "CI failed".into());
+        }
+        if let Some(s) = local.filter(|s| !s.upstream.is_empty()) {
+            if s.ahead > 0 {
+                return (Pending, format!("{} unpushed", s.ahead));
+            }
+            if s.behind > 0 {
+                return (Pending, format!("{} incoming", s.behind));
+            }
+        }
+        if known_count(&self.remote.proposals) + known_count(&self.remote.drafts) > 0 {
+            return (Pending, "Release pending".into());
+        }
+        if local.is_some_and(LocalState::dirty) {
+            return (LocalWork, "Local changes".into());
+        }
+        // An empty reason does not claim that unavailable observations are healthy.
+        (Quiet, String::new())
+    }
+}
+
 enum Message {
     Local(String, Box<Observation<LocalState>>),
     Remote(String, Box<RemoteState>),
     Fetched(String, Result<()>),
     Preview(Box<Result<PullPreview>>),
+    CheckoutPreview(Box<Result<CheckoutPreview>>),
     Action(Result<String>),
     Added(Result<()>),
 }
@@ -51,6 +96,8 @@ enum Mode {
     Add(String),
     Filter,
     Confirm(Box<PullPreview>),
+    Checkout(String),
+    ConfirmCheckout(Box<CheckoutPreview>),
     Remove(String),
     Help,
 }
@@ -206,6 +253,7 @@ fn cache_path(repo: &Repo) -> Option<PathBuf> {
     format!("{:?}", repo.identity).hash(&mut hasher);
     repo.release_workflows.hash(&mut hasher);
     repo.release_labels.hash(&mut hasher);
+    repo.issue_labels.hash(&mut hasher);
     Some(
         dirs::cache_dir()?
             .join("phrourion")
@@ -222,6 +270,8 @@ fn cached(repo: &Repo) -> RemoteState {
             default_branch: Observation::failure("Cached; awaiting refresh"),
             branches: Observation::failure("Cached; awaiting refresh"),
             prs: Observation::failure("Cached; awaiting refresh"),
+            review_requests: Observation::failure("Cached; awaiting refresh"),
+            issues: Observation::failure("Cached; awaiting refresh"),
             proposals: Observation::failure("Cached; awaiting refresh"),
             drafts: Observation::failure("Cached; awaiting refresh"),
             published: Observation::failure("Cached; awaiting refresh"),
@@ -278,7 +328,8 @@ impl App {
     }
     fn visible(&self) -> Vec<usize> {
         let query = self.filter.to_lowercase();
-        self.rows
+        let mut visible: Vec<_> = self
+            .rows
             .iter()
             .enumerate()
             .filter(|(_, r)| {
@@ -287,10 +338,27 @@ impl App {
                     .contains(&query)
             })
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+        visible.sort_by_cached_key(|&i| {
+            let row = &self.rows[i];
+            (
+                row.attention().0,
+                clean(&row.repo.name).to_lowercase(),
+                row.repo.id.clone(),
+            )
+        });
+        visible
     }
     fn current(&self) -> Option<usize> {
         self.visible().get(self.selected).copied()
+    }
+    fn update_rows(&mut self, update: impl FnOnce(&mut Vec<RowState>)) {
+        let selected_id = self.current().map(|i| self.rows[i].repo.id.clone());
+        update(&mut self.rows);
+        let visible = self.visible();
+        self.selected = selected_id
+            .and_then(|id| visible.iter().position(|&i| self.rows[i].repo.id == id))
+            .unwrap_or_else(|| self.selected.min(visible.len().saturating_sub(1)));
     }
     fn record(&mut self, s: impl ToString) {
         self.log.push(s.to_string());
@@ -425,6 +493,61 @@ fn health_glyph(row: &RowState) -> &'static str {
         "·"
     } else {
         "●"
+    }
+}
+
+// A repo moving into Problem or Pending from a calmer tier is worth a notification;
+// staying within the tier (e.g. one unpushed commit becoming two) is not.
+fn entered_notice_tier(before: AttentionPriority, after: AttentionPriority) -> bool {
+    after <= AttentionPriority::Pending && before > AttentionPriority::Pending
+}
+
+fn applescript_string_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn notify_script(title: &str, body: &str) -> String {
+    format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_string_literal(body),
+        applescript_string_literal(title)
+    )
+}
+
+async fn notify(repo_name: &str, reason: &str, cwd: &Path) {
+    let title = clean(repo_name);
+    let body = clean(reason);
+    let (program, args) = if cfg!(target_os = "macos") {
+        (
+            "osascript".to_string(),
+            vec!["-e".to_string(), notify_script(&title, &body)],
+        )
+    } else {
+        ("notify-send".to_string(), vec![title, body])
+    };
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let _ = crate::command::run(&program, &args, cwd).await;
+}
+
+fn notify_on_attention_entry(
+    app: &App,
+    tasks: &mut JoinSet<()>,
+    id: &str,
+    before: Option<(AttentionPriority, String)>,
+) {
+    let Some((before_priority, _)) = before else {
+        return;
+    };
+    let Some(row) = app.rows.iter().find(|r| r.repo.id == id) else {
+        return;
+    };
+    let (after_priority, reason) = row.attention();
+    if entered_notice_tier(before_priority, after_priority) {
+        let name = row.repo.name.clone();
+        let path = row.repo.path.clone();
+        tasks.spawn(async move {
+            notify(&name, &reason, &path).await;
+        });
     }
 }
 
@@ -599,13 +722,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         areas[1],
     );
     let visible = app.visible();
-    let narrow = frame.area().width < 90;
+    let narrow = frame.area().width < 110;
     struct RowText {
         repo_label: String,
+        attention: String,
         branch: String,
         local: String,
         sync: String,
         prs: String,
+        review: String,
+        issues: String,
         rel_draft: String,
         ci: String,
         tone: Color,
@@ -643,10 +769,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
             };
             RowText {
                 repo_label: format!("{} {}", health_glyph(r), clean(&r.repo.name)),
+                attention: r.attention().1,
                 branch,
                 local,
                 sync,
                 prs: count(&r.remote.prs),
+                review: count(&r.remote.review_requests),
+                issues: count(&r.remote.issues),
                 rel_draft: format!(
                     "{} / {}",
                     count(&r.remote.proposals),
@@ -667,8 +796,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
             .max(header.chars().count()) as u16
     };
     let local_w = column_width("Local", |r| &r.local);
+    let attention_w = column_width("Attention", |r| &r.attention);
     let sync_w = column_width("Sync*", |r| &r.sync);
     let prs_w = column_width("PRs", |r| &r.prs);
+    let review_w = column_width("Review", |r| &r.review);
+    let issues_w = column_width("Issues", |r| &r.issues);
     let rel_draft_w = column_width("Rel / Draft", |r| &r.rel_draft);
     let ci_w = column_width("CI", |r| &r.ci);
     let right = |s: String, style: Style| {
@@ -677,13 +809,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let rows = row_texts.into_iter().map(|r| {
         let mut cells = vec![
             Cell::from(r.repo_label).style(Style::default().fg(r.tone)),
-            Cell::from(r.branch).style(Style::default().fg(Color::Blue)),
-            right(r.local, Style::default().fg(r.tone)),
-            right(r.sync, Style::default().fg(r.tone)),
+            Cell::from(r.attention),
         ];
         if !narrow {
             cells.extend([
+                Cell::from(r.branch).style(Style::default().fg(Color::Blue)),
+                right(r.local, Style::default().fg(r.tone)),
+            ]);
+        }
+        cells.push(right(r.sync, Style::default().fg(r.tone)));
+        if !narrow {
+            cells.extend([
                 right(r.prs, Style::default().fg(Color::Magenta)),
+                right(r.review, Style::default().fg(Color::LightMagenta)),
+                right(r.issues, Style::default().fg(Color::Cyan)),
                 right(r.rel_draft, Style::default().fg(Color::Yellow)),
                 right(r.ci, Style::default().fg(r.ci_color)),
             ]);
@@ -691,29 +830,33 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Row::new(cells)
     });
     let heading = |s: &'static str| Cell::from(Line::from(s).alignment(Alignment::Right));
-    let mut headings = vec![
-        Cell::from("Repository"),
-        Cell::from("Branch"),
-        heading("Local"),
-        heading("Sync*"),
-    ];
-    let mut widths = vec![
-        Constraint::Fill(5),
-        Constraint::Fill(8),
-        Constraint::Length(local_w),
-        Constraint::Length(sync_w),
-    ];
+    let mut headings = vec![Cell::from("Repository"), Cell::from("Attention")];
+    let mut widths = vec![Constraint::Fill(5), Constraint::Length(attention_w)];
     if !narrow {
-        headings.extend([heading("PRs"), heading("Rel / Draft"), heading("CI")]);
+        headings.extend([Cell::from("Branch"), heading("Local")]);
+        widths.extend([Constraint::Fill(8), Constraint::Length(local_w)]);
+    }
+    headings.push(heading("Sync*"));
+    widths.push(Constraint::Length(sync_w));
+    if !narrow {
+        headings.extend([
+            heading("PRs"),
+            heading("Review"),
+            heading("Issues"),
+            heading("Rel / Draft"),
+            heading("CI"),
+        ]);
         widths.extend([
             Constraint::Length(prs_w),
+            Constraint::Length(review_w),
+            Constraint::Length(issues_w),
             Constraint::Length(rel_draft_w),
             Constraint::Length(ci_w),
         ]);
     }
     let table = Table::new(rows, widths)
         .header(Row::new(headings).style(Style::default().fg(Color::Yellow)))
-        .block(Block::bordered().title(" Checkouts "))
+        .block(Block::bordered().title(" Checkouts / attention first "))
         .row_highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol("> ");
     frame.render_stateful_widget(
@@ -775,11 +918,25 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 }
                 details.push_str(&items("Remote branches", &row.remote.branches));
             }
-            2 => details.push_str(&items(
-                "Open pull requests (open in browser for head checks)",
-                &row.remote.prs,
-            )),
+            2 => {
+                details.push_str(&items(
+                    "Open pull requests (open in browser for head checks)",
+                    &row.remote.prs,
+                ));
+                details.push_str(&items("Awaiting your review", &row.remote.review_requests));
+            }
             3 => {
+                let label = if row.repo.issue_labels.is_empty() {
+                    "Open issues (configure issue_labels to filter)".to_string()
+                } else {
+                    format!(
+                        "Open issues (filtered by label: {})",
+                        row.repo.issue_labels.join(", ")
+                    )
+                };
+                details.push_str(&items(&label, &row.remote.issues));
+            }
+            4 => {
                 details.push_str(&items("Release proposals", &row.remote.proposals));
                 details.push_str(&items("Draft releases", &row.remote.drafts));
                 details.push_str(&items(
@@ -801,7 +958,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
             "No matching repositories. Press a to add a checkout, or use phrourion discover PATH.",
         );
     }
-    let title = ["1 State", "2 Branches", "3 PRs", "4 Releases", "5 Actions"][app.tab];
+    let title = [
+        "1 State",
+        "2 Branches",
+        "3 PRs",
+        "4 Issues",
+        "5 Releases",
+        "6 Actions",
+    ][app.tab];
     frame.render_widget(
         Paragraph::new(details)
             .block(Block::bordered().title(title))
@@ -813,10 +977,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Add(s) => format!("Add: PATH | REMOTE (remote optional): {}  [Enter save / Esc cancel]", clean(s)),
         Mode::Filter => "Type filter, Enter done, Esc clear".into(),
         Mode::Confirm(p) => format!("Pull {} [{}] {} -> {} ({} commits)? y / n", clean(&p.repo.path.display().to_string()), clean(&p.before.branch), &p.before.head[..7.min(p.before.head.len())], &p.target[..7.min(p.target.len())], p.before.behind),
+        Mode::Checkout(s) => format!("Checkout PR number: {}  [Enter preview / Esc cancel]", clean(s)),
+        Mode::ConfirmCheckout(p) => format!("Checkout PR #{} as {} in {}? y / n", p.number, clean(&p.branch), clean(&p.repo.path.display().to_string())),
         Mode::Remove(name) => format!("Remove {} from registry only? y / n", clean(name)),
-        Mode::Help => "j/k move | 1-5 tabs | PgUp/PgDn scroll | a add | d remove | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
+        Mode::Help => "j/k move | 1-6 tabs | PgUp/PgDn scroll | a add | d remove | c checkout PR | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
         Mode::Normal if app.action_busy => format!("{} action running... monitoring remains available", spinner_frame(animation_frame())),
-        Mode::Normal => "a add  d remove  / filter  1-5 details  r refresh  p pull  o browser  ? help  q quit".into(),
+        Mode::Normal => "a add  d remove  c checkout PR  / filter  1-6 details  r refresh  p pull  o browser  ? help  q quit".into(),
     };
     let mut footer = vec![Line::from(vec![
         Span::styled(
@@ -938,23 +1104,39 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
         while let Ok(message) = rx.try_recv() {
             match message {
                 Message::Local(id, state) => {
-                    if let Some(row) = app.rows.iter_mut().find(|r| r.repo.id == id) {
-                        row.local = (*state).retain_previous(&row.local);
-                        row.local_busy = false;
-                    }
+                    let before = app
+                        .rows
+                        .iter()
+                        .find(|r| r.repo.id == id)
+                        .map(RowState::attention);
+                    app.update_rows(|rows| {
+                        if let Some(row) = rows.iter_mut().find(|r| r.repo.id == id) {
+                            row.local = (*state).retain_previous(&row.local);
+                            row.local_busy = false;
+                        }
+                    });
+                    notify_on_attention_entry(app, &mut tasks, &id, before);
                 }
                 Message::Remote(id, state) => {
-                    if let Some(row) = app.rows.iter_mut().find(|r| r.repo.id == id) {
-                        let failed = state.default_branch.error.is_some()
-                            || state.prs.error.is_some()
-                            || state.ci.error.is_some();
-                        row.failures = if failed { (row.failures + 1).min(4) } else { 0 };
-                        row.next_remote =
-                            Instant::now() + Duration::from_secs(60 * 2_u64.pow(row.failures));
-                        row.remote = state.retain_previous(&row.remote);
-                        row.remote_busy = false;
-                        save_cache(&row.repo, &row.remote);
-                    }
+                    let before = app
+                        .rows
+                        .iter()
+                        .find(|r| r.repo.id == id)
+                        .map(RowState::attention);
+                    app.update_rows(|rows| {
+                        if let Some(row) = rows.iter_mut().find(|r| r.repo.id == id) {
+                            let failed = state.default_branch.error.is_some()
+                                || state.prs.error.is_some()
+                                || state.ci.error.is_some();
+                            row.failures = if failed { (row.failures + 1).min(4) } else { 0 };
+                            row.next_remote =
+                                Instant::now() + Duration::from_secs(60 * 2_u64.pow(row.failures));
+                            row.remote = state.retain_previous(&row.remote);
+                            row.remote_busy = false;
+                            save_cache(&row.repo, &row.remote);
+                        }
+                    });
+                    notify_on_attention_entry(app, &mut tasks, &id, before);
                 }
                 Message::Fetched(id, result) => {
                     if let Some(row) = app.rows.iter_mut().find(|r| r.repo.id == id) {
@@ -977,6 +1159,13 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                         Err(e) => app.record(e),
                     }
                 }
+                Message::CheckoutPreview(result) => {
+                    app.action_busy = false;
+                    match *result {
+                        Ok(p) => app.mode = Mode::ConfirmCheckout(Box::new(p)),
+                        Err(e) => app.record(e),
+                    }
+                }
                 Message::Action(result) => {
                     app.action_busy = false;
                     app.record(match result {
@@ -989,15 +1178,17 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                     app.action_busy = false;
                     match result {
                         Ok(()) => {
-                            let old: HashMap<_, _> =
-                                app.rows.drain(..).map(|r| (r.repo.id.clone(), r)).collect();
                             let mut fresh = App::new(registry::load(config)?.repos);
-                            for row in &mut fresh.rows {
-                                if let Some(previous) = old.get(&row.repo.id) {
-                                    *row = previous.clone();
+                            app.update_rows(|rows| {
+                                let old: HashMap<_, _> =
+                                    rows.drain(..).map(|r| (r.repo.id.clone(), r)).collect();
+                                for row in &mut fresh.rows {
+                                    if let Some(previous) = old.get(&row.repo.id) {
+                                        *row = previous.clone();
+                                    }
                                 }
-                            }
-                            app.rows = fresh.rows;
+                                *rows = fresh.rows;
+                            });
                             app.record("Registry updated");
                         }
                         Err(e) => app.record(e),
@@ -1076,6 +1267,47 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                     KeyCode::Esc | KeyCode::Char('n') => app.mode = Mode::Normal,
                     _ => {}
                 },
+                Mode::Checkout(input) => match key.code {
+                    KeyCode::Esc => app.mode = Mode::Normal,
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => input.push(c),
+                    KeyCode::Enter => {
+                        let number = input.trim().parse::<u64>().ok();
+                        match (number, app.current()) {
+                            (Some(number), Some(i)) => {
+                                let repo = app.rows[i].repo.clone();
+                                let tx = tx.clone();
+                                app.mode = Mode::Normal;
+                                app.action_busy = true;
+                                tasks.spawn(async move {
+                                    let _ = tx.send(Message::CheckoutPreview(Box::new(
+                                        git::checkout_preview(&repo, number).await,
+                                    )));
+                                });
+                            }
+                            _ => {
+                                app.record("Enter a PR number to checkout");
+                                app.mode = Mode::Normal;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Mode::ConfirmCheckout(preview) => match key.code {
+                    KeyCode::Char('y') => {
+                        let preview = preview.clone();
+                        let tx = tx.clone();
+                        app.mode = Mode::Normal;
+                        app.action_busy = true;
+                        tasks.spawn(async move {
+                            let _ = tx.send(Message::Action(git::checkout_apply(&preview).await));
+                        });
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') => app.mode = Mode::Normal,
+                    _ => {}
+                },
                 Mode::Remove(id) => match key.code {
                     KeyCode::Char('y') => {
                         let id = id.clone();
@@ -1111,12 +1343,17 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                             app.mode = Mode::Remove(app.rows[i].repo.id.clone());
                         }
                     }
-                    KeyCode::Char(c @ '1'..='5') => {
+                    KeyCode::Char('c') if !app.action_busy => {
+                        if app.current().is_some() {
+                            app.mode = Mode::Checkout(String::new());
+                        }
+                    }
+                    KeyCode::Char(c @ '1'..='6') => {
                         app.tab = c as usize - '1' as usize;
                         app.scroll = 0;
                     }
                     KeyCode::Enter | KeyCode::Tab => {
-                        app.tab = (app.tab + 1) % 5;
+                        app.tab = (app.tab + 1) % 6;
                         app.scroll = 0;
                     }
                     KeyCode::PageDown => app.scroll = app.scroll.saturating_add(8),
@@ -1161,7 +1398,8 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                         {
                             let url = match app.tab {
                                 2 => format!("{url}/pulls"),
-                                3 => format!("{url}/releases"),
+                                3 => format!("{url}/issues"),
+                                4 => format!("{url}/releases"),
                                 _ => url,
                             };
                             let path = app.rows[i].repo.path.clone();
@@ -1193,6 +1431,27 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
 mod tests {
     use super::*;
 
+    #[test]
+    fn notify_script_escapes_quotes_and_backslashes_in_repo_supplied_text() {
+        let script = notify_script(r#"weird "repo\name""#, "CI failed");
+        assert_eq!(
+            script,
+            r#"display notification "CI failed" with title "weird \"repo\\name\"""#
+        );
+    }
+
+    #[test]
+    fn notice_fires_only_when_entering_problem_or_pending_from_a_calmer_tier() {
+        use AttentionPriority::*;
+        assert!(entered_notice_tier(Quiet, Problem));
+        assert!(entered_notice_tier(LocalWork, Pending));
+        assert!(entered_notice_tier(Quiet, Pending));
+        assert!(!entered_notice_tier(Problem, Problem));
+        assert!(!entered_notice_tier(Pending, Problem));
+        assert!(!entered_notice_tier(Quiet, LocalWork));
+        assert!(!entered_notice_tier(Quiet, Quiet));
+    }
+
     fn test_row(local: LocalState) -> RowState {
         RowState {
             repo: Repo {
@@ -1208,6 +1467,7 @@ mod tests {
                 enabled: true,
                 release_workflows: Vec::new(),
                 release_labels: Vec::new(),
+                issue_labels: Vec::new(),
             },
             local: Observation::success(local),
             remote: RemoteState::default(),
@@ -1216,6 +1476,157 @@ mod tests {
             remote_busy: true,
             next_remote: Instant::now(),
             failures: 0,
+        }
+    }
+
+    #[test]
+    fn attention_orders_groups_then_names_without_adding_minor_conditions() {
+        let mut app = App::new(Vec::new());
+        for (name, local) in [
+            ("quiet", LocalState::default()),
+            (
+                "dirty",
+                LocalState {
+                    modified: 9,
+                    ..LocalState::default()
+                },
+            ),
+            (
+                "z-conflict",
+                LocalState {
+                    conflicts: 1,
+                    ..LocalState::default()
+                },
+            ),
+            (
+                "b-incoming",
+                LocalState {
+                    upstream: "origin/main".into(),
+                    behind: 2,
+                    modified: 4,
+                    ..LocalState::default()
+                },
+            ),
+            (
+                "a-unpushed",
+                LocalState {
+                    upstream: "origin/main".into(),
+                    ahead: 3,
+                    ..LocalState::default()
+                },
+            ),
+            (
+                "a-diverged",
+                LocalState {
+                    upstream: "origin/main".into(),
+                    ahead: 1,
+                    behind: 1,
+                    ..LocalState::default()
+                },
+            ),
+        ] {
+            let mut row = test_row(local);
+            row.repo.name = name.into();
+            row.repo.id = name.into();
+            app.rows.push(row);
+        }
+        let names: Vec<_> = app
+            .visible()
+            .into_iter()
+            .map(|i| app.rows[i].repo.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "a-diverged",
+                "z-conflict",
+                "a-unpushed",
+                "b-incoming",
+                "dirty",
+                "quiet"
+            ]
+        );
+        app.filter = "incoming".into();
+        assert_eq!(app.visible(), [3]);
+    }
+
+    #[test]
+    fn attention_prioritizes_confirmed_ci_and_pending_releases() {
+        let mut app = App::new(Vec::new());
+        for name in ["quiet", "release", "failed", "stale", "unsupported"] {
+            let mut row = test_row(LocalState::default());
+            row.repo.name = name.into();
+            row.repo.id = name.into();
+            app.rows.push(row);
+        }
+        app.rows[1].remote.drafts = Observation::success(vec![crate::model::Item::default()]);
+        let failed = Observation::success(vec![crate::model::Item {
+            detail: "completed failure | abc".into(),
+            ..Default::default()
+        }]);
+        app.rows[2].remote.ci = failed.clone();
+        app.rows[3].remote.ci = Observation::failure("offline").retain_previous(&failed);
+        app.rows[3].local =
+            Observation::failure("missing").retain_previous(&Observation::success(LocalState {
+                conflicts: 1,
+                ..Default::default()
+            }));
+        app.rows[4].remote.ci = failed;
+        app.rows[4].remote.ci.supported = false;
+        let names: Vec<_> = app
+            .visible()
+            .into_iter()
+            .map(|i| app.rows[i].repo.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["failed", "release", "quiet", "stale", "unsupported"]
+        );
+    }
+
+    #[test]
+    fn attention_refresh_preserves_selection_and_handles_removal() {
+        let mut app = App::new(Vec::new());
+        for name in ["alpha", "beta", "gamma"] {
+            let mut row = test_row(LocalState::default());
+            row.repo.name = name.into();
+            row.repo.id = name.into();
+            app.rows.push(row);
+        }
+        app.selected = 1;
+        app.update_rows(|rows| rows[2].local.data.as_mut().unwrap().conflicts = 1);
+        assert_eq!(app.current(), Some(1));
+        assert_eq!(app.selected, 2);
+        app.update_rows(|rows| rows.retain(|r| r.repo.id != "beta"));
+        assert!(app.current().is_some());
+        app.update_rows(Vec::clear);
+        assert_eq!(app.current(), None);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn attention_reason_is_visible_on_compact_and_wide_screens() {
+        for width in [80, 140] {
+            let mut row = test_row(LocalState {
+                upstream: "origin/main".into(),
+                ahead: 3,
+                modified: 1,
+                ..Default::default()
+            });
+            row.remote.ci = Observation::success(vec![crate::model::Item {
+                detail: "completed failure | abc".into(),
+                ..Default::default()
+            }]);
+            let mut app = App::new(Vec::new());
+            app.rows.push(row);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
+            assert!(text.contains("Attention"));
+            assert!(text.contains("CI failed"));
+            assert!(!text.contains("3 unpushed"));
         }
     }
 

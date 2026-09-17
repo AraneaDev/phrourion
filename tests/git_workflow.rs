@@ -52,6 +52,22 @@ impl Fixture {
         git_cmd(&self.a, &["commit", "-m", "feat: new content"]);
         git_cmd(&self.a, &["push"]);
     }
+    // Simulates a GitHub PR: a commit reachable only via refs/pull/{number}/head,
+    // the same special ref GitHub itself publishes on every open pull request.
+    fn open_pr(&self, number: u64) -> String {
+        git_cmd(&self.a, &["checkout", "-b", &format!("topic-{number}")]);
+        std::fs::write(self.a.join(format!("pr{number}.txt")), "pr content").unwrap();
+        git_cmd(&self.a, &["add", "."]);
+        git_cmd(&self.a, &["commit", "-m", &format!("feat: pr {number}")]);
+        let sha = git_cmd(&self.a, &["rev-parse", "HEAD"]);
+        git_cmd(
+            &self.a,
+            &["push", "origin", &format!("HEAD:refs/pull/{number}/head")],
+        );
+        git_cmd(&self.a, &["checkout", "main"]);
+        git_cmd(&self.a, &["branch", "-D", &format!("topic-{number}")]);
+        sha
+    }
 }
 
 #[tokio::test]
@@ -185,6 +201,66 @@ async fn renamed_files_and_untracked_names_do_not_confuse_status_parser() {
     assert_eq!(state.staged, 1);
     assert_eq!(state.untracked, 1);
     assert_eq!(state.changes.len(), 2);
+}
+
+#[tokio::test]
+async fn checkout_fetches_pr_head_into_a_new_local_branch() {
+    let f = Fixture::new();
+    let repo = registry::entry(&f.b, None, None).await.unwrap();
+    let sha = f.open_pr(7);
+    let preview = git::checkout_preview(&repo, 7).await.unwrap();
+    assert_eq!(preview.branch, "pr/7");
+    assert_eq!(preview.target, sha);
+    assert_eq!(git_cmd(&f.b, &["branch", "--show-current"]), "main");
+    git::checkout_apply(&preview).await.unwrap();
+    assert_eq!(git_cmd(&f.b, &["branch", "--show-current"]), "pr/7");
+    assert_eq!(git_cmd(&f.b, &["rev-parse", "HEAD"]), sha);
+    assert_eq!(
+        std::fs::read_to_string(f.b.join("pr7.txt")).unwrap(),
+        "pr content"
+    );
+}
+
+#[tokio::test]
+async fn checkout_is_refused_when_tree_is_dirty() {
+    let f = Fixture::new();
+    let repo = registry::entry(&f.b, None, None).await.unwrap();
+    f.open_pr(7);
+    std::fs::write(f.b.join("precious.txt"), "keep me").unwrap();
+    assert!(
+        git::checkout_preview(&repo, 7)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("uncommitted")
+    );
+    assert_eq!(git_cmd(&f.b, &["branch", "--show-current"]), "main");
+}
+
+#[tokio::test]
+async fn checkout_is_refused_when_the_local_branch_name_is_taken() {
+    let f = Fixture::new();
+    let repo = registry::entry(&f.b, None, None).await.unwrap();
+    f.open_pr(7);
+    git_cmd(&f.b, &["branch", "pr/7"]);
+    assert!(
+        git::checkout_preview(&repo, 7)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already exists")
+    );
+}
+
+#[tokio::test]
+async fn checkout_apply_is_refused_if_the_tree_changed_since_preview() {
+    let f = Fixture::new();
+    let repo = registry::entry(&f.b, None, None).await.unwrap();
+    f.open_pr(7);
+    let preview = git::checkout_preview(&repo, 7).await.unwrap();
+    std::fs::write(f.b.join("precious.txt"), "keep me").unwrap();
+    assert!(git::checkout_apply(&preview).await.is_err());
+    assert_eq!(git_cmd(&f.b, &["branch", "--show-current"]), "main");
 }
 
 #[test]
