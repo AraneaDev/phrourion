@@ -74,6 +74,14 @@ when XDG is not available. It stores paths and remote identities, not tokens.
 
 ## Actions
 
+The dashboard orders repositories by attention needed: conflicts, diverged
+branches, and failed CI first; unpushed commits, incoming updates, and pending
+release proposals or drafts next; ordinary uncommitted changes just above quiet
+checkouts. Repositories within each group sort alphabetically. The Attention
+column shows the highest-priority reason, and selection stays on the same
+repository when refreshes change the order. Stale or unavailable observations
+do not count as confirmed attention signals; their existing status indicators
+remain visible. Compact terminals show repository, attention, and sync columns.
 When a repository newly enters conflict, failed-CI, diverged, or pending-release
 state while `phro` is running, it raises a desktop notification (`notify-send`
 on Linux, `osascript` on macOS) once for that transition, not on every refresh.
