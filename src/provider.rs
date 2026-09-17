@@ -46,6 +46,19 @@ pub struct Github;
 const RATE_LIMIT_ATTEMPTS: u32 = 3;
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
 
+// Test seam, same pattern as PHROURION_GH/PHROURION_FORGEJO_TEST_URL: lets
+// tests exercise the real retry loop (attempt count, backoff doubling)
+// without paying RATE_LIMIT_BACKOFF's real delay on every attempt — which
+// otherwise taxes every mutation-testing run of the whole suite, not just
+// this crate's own `cargo test`.
+fn initial_backoff() -> Duration {
+    std::env::var("PHROURION_RATE_LIMIT_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(RATE_LIMIT_BACKOFF)
+}
+
 // gh reports both primary and secondary rate limits as plain text on stderr, no
 // structured status; matching a substring is the only signal command::run exposes.
 fn is_rate_limited(error: &str) -> bool {
@@ -66,7 +79,7 @@ async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
     if pages {
         args.extend(["--paginate", "--slurp"]);
     }
-    let mut backoff = RATE_LIMIT_BACKOFF;
+    let mut backoff = initial_backoff();
     let mut attempts_left = RATE_LIMIT_ATTEMPTS;
     loop {
         attempts_left -= 1;
@@ -713,9 +726,18 @@ mod tests {
         );
         let gh = write_executable(dir.path(), "fake-gh-retry", &script);
         let repo = test_repo();
-        let value = with_fake_gh(&gh, api(&repo, "some/endpoint", false))
-            .await
-            .expect("should succeed after one retry");
+        let previous_backoff = std::env::var("PHROURION_RATE_LIMIT_BACKOFF_MS").ok();
+        unsafe {
+            std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", "1");
+        }
+        let value = with_fake_gh(&gh, api(&repo, "some/endpoint", false)).await;
+        unsafe {
+            match &previous_backoff {
+                Some(v) => std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", v),
+                None => std::env::remove_var("PHROURION_RATE_LIMIT_BACKOFF_MS"),
+            }
+        }
+        let value = value.expect("should succeed after one retry");
         assert_eq!(value["ok"], true);
         assert_eq!(
             std::fs::read_to_string(&counter).unwrap().trim(),
@@ -740,7 +762,17 @@ mod tests {
         );
         let gh = write_executable(dir.path(), "fake-gh-exhaust", &script);
         let repo = test_repo();
+        let previous_backoff = std::env::var("PHROURION_RATE_LIMIT_BACKOFF_MS").ok();
+        unsafe {
+            std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", "1");
+        }
         let result = with_fake_gh(&gh, api(&repo, "some/endpoint", false)).await;
+        unsafe {
+            match &previous_backoff {
+                Some(v) => std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", v),
+                None => std::env::remove_var("PHROURION_RATE_LIMIT_BACKOFF_MS"),
+            }
+        }
         assert!(result.is_err());
         // RATE_LIMIT_ATTEMPTS = 3: exactly 3 attempts — neither a premature
         // give-up nor an infinite retry loop.
