@@ -116,7 +116,7 @@ Capabilities are granular. Unsupported draft releases, checks, or workflow opera
 
 GitHub uses the existing authenticated `gh` executable, always with an explicit host and repository. Phrourion does not persist provider tokens. Command execution, pagination, backoff, and cache behavior are shared infrastructure.
 
-Adding GitLab, Bitbucket, or Forgejo requires a provider module, registration in the provider factory, URL fixtures, and shared contract tests. No TUI changes should be required. Support custom hosts and provider overrides for URLs that cannot identify the service. Bitbucket Cloud and Server/Data Center must be identified separately because their APIs differ. A provider's native CLI is optional; adapters may use HTTP with external credential sources when no suitable CLI exists.
+Forgejo now has a working adapter, following this same provider-module shape over HTTP (no suitable CLI exists, so it uses external credential sources instead). Adding GitLab or Bitbucket still requires a provider module, registration in the provider factory, URL fixtures, and shared contract tests. No TUI changes should be required. Support custom hosts and provider overrides for URLs that cannot identify the service. Bitbucket Cloud and Server/Data Center must be identified separately because their APIs differ.
 
 ## Components
 
@@ -138,4 +138,4 @@ Keep subprocess execution behind a testable interface. Escape untrusted terminal
 5. Pull actions: bare local remotes and two checkouts verify only the registered folder changes, only fast-forwards occur, changed previews are rejected, feature branches stay selected, and dirty/diverged checkouts are preserved.
 6. Integration: register the 13 actual checkouts, compare displayed state with explicit Git/provider queries, and exercise actions against disposable fixtures. Add README usage, CI, and a release policy that does not release docs/test/CI-only changes.
 
-The first delivery is GitHub monitoring and safe local pull. GitLab, Bitbucket, and Forgejo implementations follow through the same tested boundary. The user registry and credentials are never committed to Phrourion.
+The first delivery is GitHub monitoring and safe local pull. The Forgejo adapter has since shipped through the same tested boundary; GitLab and Bitbucket implementations follow it next. The user registry and credentials are never committed to Phrourion.

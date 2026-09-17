@@ -143,7 +143,12 @@ For a self-hosted or Codeberg Forgejo instance, monitoring a private repository
 requires a personal access token in an environment variable named after the
 host: uppercase it and replace every non-alphanumeric character with `_`, then
 prefix with `PHROURION_TOKEN_`. For example, `codeberg.org` becomes
-`PHROURION_TOKEN_CODEBERG_ORG`. Public repositories work without a token.
+`PHROURION_TOKEN_CODEBERG_ORG`. Public repositories work without a token. Only
+`codeberg.org` is auto-detected as a Forgejo host; any other self-hosted
+Forgejo instance must be registered with `--provider forgejo` explicitly. The
+Forgejo adapter uses `rustls` with the bundled Mozilla root store, so a
+self-hosted instance behind a private/internal CA certificate isn't supported
+yet.
 
 ## Use
 
