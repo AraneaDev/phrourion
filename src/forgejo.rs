@@ -1,6 +1,11 @@
 //! Forgejo/Gitea-compatible hosting adapter. HTTP-based: no gh-equivalent CLI
 //! exists for Forgejo, so this talks to the REST API directly.
 
+use anyhow::{Context, Result, bail};
+use reqwest::Client;
+use serde_json::Value;
+use std::sync::OnceLock;
+
 pub fn env_token_var(host: &str) -> String {
     let normalized: String = host
         .chars()
@@ -15,11 +20,51 @@ pub fn env_token_var(host: &str) -> String {
     format!("PHROURION_TOKEN_{normalized}")
 }
 
-#[allow(dead_code)]
 pub(crate) fn base_url(host: &str) -> String {
     let root =
         std::env::var("PHROURION_FORGEJO_TEST_URL").unwrap_or_else(|_| format!("https://{host}"));
     format!("{root}/api/v1")
+}
+
+pub(crate) fn client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(Client::new)
+}
+
+pub(crate) async fn get(host: &str, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+    let url = format!("{}/{path}", base_url(host));
+    let mut request = client().get(&url).query(query);
+    if let Ok(token) = std::env::var(env_token_var(host)) {
+        request = request.header("Authorization", format!("token {token}"));
+    }
+    let response = request.send().await.context("Forgejo request failed")?;
+    let status = response.status();
+    let body: Value = response.json().await.context("Invalid Forgejo JSON")?;
+    if !status.is_success() {
+        let message = body["message"].as_str().unwrap_or("Forgejo API error");
+        bail!("{status}: {message}");
+    }
+    Ok(body)
+}
+
+pub(crate) async fn paginated(host: &str, path: &str, query: &[(&str, &str)]) -> Result<Vec<Value>> {
+    let mut rows = Vec::new();
+    let mut page: u32 = 1;
+    loop {
+        let page_str = page.to_string();
+        let mut full_query: Vec<(&str, &str)> = query.to_vec();
+        full_query.push(("page", &page_str));
+        full_query.push(("limit", "50"));
+        let value = get(host, path, &full_query).await?;
+        let batch = value.as_array().context("Expected a JSON array")?.clone();
+        let count = batch.len();
+        rows.extend(batch);
+        if count < 50 {
+            break;
+        }
+        page += 1;
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
