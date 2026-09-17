@@ -45,6 +45,14 @@ enum AttentionPriority {
     Quiet,
 }
 
+fn attention_priority_color(priority: AttentionPriority) -> Color {
+    match priority {
+        AttentionPriority::Problem => Color::Red,
+        AttentionPriority::Pending | AttentionPriority::LocalWork => Color::Yellow,
+        AttentionPriority::Quiet => Color::Reset,
+    }
+}
+
 impl RowState {
     fn attention(&self) -> (AttentionPriority, String) {
         use AttentionPriority::*;
@@ -808,8 +816,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 Style::default().fg(Color::Cyan),
             ),
         ]))
-        .block(Block::bordered().title(" Triage  /  WATCH "))
-        .style(Style::default().fg(Color::Gray)),
+        .block(
+            Block::bordered()
+                .title(" Triage  /  WATCH ")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        ),
         areas[1],
     );
     let visible = app.visible();
@@ -817,6 +828,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     struct RowText {
         repo_label: String,
         attention: String,
+        attention_color: Color,
         branch: String,
         local: String,
         sync: String,
@@ -872,9 +884,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
             };
             let rel_draft_color =
                 count_color_combined(&r.remote.proposals, &r.remote.drafts, Color::Yellow);
+            let (attention_priority, attention) = r.attention();
+            let attention_color = attention_priority_color(attention_priority);
             RowText {
                 repo_label: format!("{} {}", health_glyph(r), clean(&r.repo.name)),
-                attention: r.attention().1,
+                attention,
+                attention_color,
                 branch,
                 local,
                 sync,
@@ -918,7 +933,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let rows = row_texts.into_iter().map(|r| {
         let mut cells = vec![
             Cell::from(r.repo_label).style(Style::default().fg(r.tone)),
-            Cell::from(r.attention),
+            Cell::from(r.attention).style(Style::default().fg(r.attention_color)),
         ];
         if !narrow {
             cells.extend([
@@ -965,7 +980,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     let table = Table::new(rows, widths)
         .header(Row::new(headings).style(Style::default().fg(Color::Yellow)))
-        .block(Block::bordered().title(" Checkouts / attention first "))
+        .block(
+            Block::bordered()
+                .title(" Checkouts / attention first ")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
         .row_highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol("> ");
     frame.render_stateful_widget(
@@ -1081,7 +1100,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ][app.tab];
     frame.render_widget(
         Paragraph::new(details)
-            .block(Block::bordered().title(title))
+            .block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
             .wrap(Wrap { trim: false })
             .scroll((app.scroll, 0)),
         areas[3],
@@ -1864,6 +1887,26 @@ mod tests {
         assert_eq!(
             count_color_combined(&errored, &empty, Color::Yellow),
             Color::Red
+        );
+    }
+
+    #[test]
+    fn attention_priority_color_flags_problem_red_and_pending_work_yellow() {
+        assert_eq!(
+            attention_priority_color(AttentionPriority::Problem),
+            Color::Red
+        );
+        assert_eq!(
+            attention_priority_color(AttentionPriority::Pending),
+            Color::Yellow
+        );
+        assert_eq!(
+            attention_priority_color(AttentionPriority::LocalWork),
+            Color::Yellow
+        );
+        assert_eq!(
+            attention_priority_color(AttentionPriority::Quiet),
+            Color::Reset
         );
     }
 
