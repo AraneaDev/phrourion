@@ -320,7 +320,7 @@ mod tests {
 
     struct MockResponse {
         status: u16,
-        body: &'static str,
+        body: String,
     }
 
     // Serves one canned response per accepted connection, in order, on a
@@ -408,7 +408,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         let (base, _rx) = serve_mock(vec![MockResponse {
             status: 200,
-            body: r#"{"hello":"world"}"#,
+            body: r#"{"hello":"world"}"#.into(),
         }]);
         let value = with_test_url(&base, get("mock", "anything", &[]))
             .await
@@ -421,7 +421,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         let (base, _rx) = serve_mock(vec![MockResponse {
             status: 200,
-            body: r#"[{"id":1},{"id":2}]"#,
+            body: r#"[{"id":1},{"id":2}]"#.into(),
         }]);
         let rows = with_test_url(&base, paginated("mock", "items", &[]))
             .await
@@ -437,10 +437,82 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         let (base, _rx) = serve_mock(vec![MockResponse {
             status: 404,
-            body: r#"{"message":"Not Found"}"#,
+            body: r#"{"message":"Not Found"}"#.into(),
         }]);
         let result = with_test_url(&base, paginated("mock", "disabled-feature", &[])).await;
         assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn paginated_propagates_a_404_on_a_later_page_as_a_real_error() {
+        let _guard = ENV_LOCK.lock().await;
+        // A full 50-item first page forces a second request; the 404 there
+        // must NOT be read as "feature disabled" (that's only true on page
+        // 1) — it's a genuine failure partway through pagination.
+        let full_page: String = format!(
+            "[{}]",
+            (0..50)
+                .map(|i| format!(r#"{{"id":{i}}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (base, _rx) = serve_mock(vec![
+            MockResponse {
+                status: 200,
+                body: full_page,
+            },
+            MockResponse {
+                status: 404,
+                body: r#"{"message":"Not Found"}"#.into(),
+            },
+        ]);
+        let result = with_test_url(&base, paginated("mock", "items", &[])).await;
+        assert!(
+            result.is_err(),
+            "a 404 past page 1 should propagate as Err, not Ok(None)"
+        );
+    }
+
+    #[tokio::test]
+    async fn paginated_continues_past_a_full_page_and_advances_the_page_number() {
+        let _guard = ENV_LOCK.lock().await;
+        let full_page: String = format!(
+            "[{}]",
+            (0..50)
+                .map(|i| format!(r#"{{"id":{i}}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (base, rx) = serve_mock(vec![
+            MockResponse {
+                status: 200,
+                body: full_page,
+            },
+            MockResponse {
+                status: 200,
+                body: r#"[{"id":9001},{"id":9002},{"id":9003}]"#.into(),
+            },
+        ]);
+        let rows = with_test_url(&base, paginated("mock", "items", &[]))
+            .await
+            .expect("both pages should parse")
+            .expect("feature is not reported disabled");
+
+        // Exactly 50 on page 1 must NOT be treated as the short/last page
+        // (`< 50`, not `<= 50`) — it has to fetch page 2 and append it.
+        assert_eq!(
+            rows.len(),
+            53,
+            "a full 50-item page must fetch another page, not stop at exactly 50"
+        );
+        assert_eq!(rows[50]["id"], 9001);
+
+        let _first_request = rx.recv().unwrap();
+        let second_request = String::from_utf8_lossy(&rx.recv().unwrap()).to_lowercase();
+        assert!(
+            second_request.contains("page=2"),
+            "expected the second request to ask for page 2: {second_request}"
+        );
     }
 
     #[tokio::test]
@@ -452,11 +524,11 @@ mod tests {
         let (base, rx) = serve_mock(vec![
             MockResponse {
                 status: 200,
-                body: "{}",
+                body: "{}".into(),
             },
             MockResponse {
                 status: 200,
-                body: "{}",
+                body: "{}".into(),
             },
         ]);
 
