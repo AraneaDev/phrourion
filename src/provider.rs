@@ -852,4 +852,38 @@ mod tests {
         assert_eq!(items[0].title, "r1");
         assert_eq!(items[1].title, "r2");
     }
+
+    #[tokio::test]
+    async fn initial_backoff_defaults_to_one_second_and_honors_the_test_override() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let previous = std::env::var("PHROURION_RATE_LIMIT_BACKOFF_MS").ok();
+        unsafe {
+            std::env::remove_var("PHROURION_RATE_LIMIT_BACKOFF_MS");
+        }
+        assert_eq!(initial_backoff(), RATE_LIMIT_BACKOFF);
+
+        unsafe {
+            std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", "42");
+        }
+        assert_eq!(initial_backoff(), Duration::from_millis(42));
+
+        unsafe {
+            match &previous {
+                Some(v) => std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", v),
+                None => std::env::remove_var("PHROURION_RATE_LIMIT_BACKOFF_MS"),
+            }
+        }
+    }
+
+    #[test]
+    fn repo_url_is_none_for_local_and_a_github_style_https_url_otherwise() {
+        let mut repo = test_repo();
+        repo.identity.kind = ProviderKind::Local;
+        assert_eq!(repo_url(&repo), None);
+
+        repo.identity.kind = ProviderKind::Github;
+        repo.identity.host = "example.com".into();
+        repo.identity.project = "org/repo".into();
+        assert_eq!(repo_url(&repo), Some("https://example.com/org/repo".into()));
+    }
 }
