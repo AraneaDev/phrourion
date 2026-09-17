@@ -220,7 +220,7 @@ mod tests {
         unsafe {
             std::env::set_var("PHROURION_FORGEJO_TEST_URL", "http://localhost:3000");
         }
-        assert_eq!(base_url("codeberg.org"), "http://localhost:3000");
+        assert_eq!(base_url("codeberg.org"), "http://localhost:3000/api/v1");
         unsafe {
             std::env::remove_var("PHROURION_FORGEJO_TEST_URL");
         }
@@ -253,10 +253,17 @@ pub fn env_token_var(host: &str) -> String {
 }
 
 pub(crate) fn base_url(host: &str) -> String {
-    std::env::var("PHROURION_FORGEJO_TEST_URL")
-        .unwrap_or_else(|_| format!("https://{host}/api/v1"))
+    let root = std::env::var("PHROURION_FORGEJO_TEST_URL")
+        .unwrap_or_else(|_| format!("https://{host}"));
+    format!("{root}/api/v1")
 }
 ```
+
+`PHROURION_FORGEJO_TEST_URL` is the bare instance root (e.g.
+`http://localhost:3000`, no `/api/v1` suffix) — `/api/v1` is always appended
+by this function, in both branches. This matches Task 5's bootstrap script,
+which prints the bare root, and its manual verification `curl` commands,
+which append `/api/v1` themselves on top of `$PHROURION_FORGEJO_TEST_URL`.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -291,14 +298,27 @@ No unit tests in this task: both functions make real HTTP calls, and the project
 
 - [ ] **Step 1: Add the imports**
 
-At the top of `src/forgejo.rs`, above the doc comment's blank line, add:
+The file currently starts with a module doc comment (the two `//!` lines)
+followed by a blank line, then `#[cfg(test)] mod tests { ... }`. Insert the
+imports after that blank line, before `#[cfg(test)]`, so the top of the file
+reads:
 
 ```rust
+//! Forgejo/Gitea-compatible hosting adapter. HTTP-based: no gh-equivalent CLI
+//! exists for Forgejo, so this talks to the REST API directly.
+
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
 use serde_json::Value;
 use std::sync::OnceLock;
+
+#[cfg(test)]
+mod tests {
 ```
+
+(The doc comment and the `#[cfg(test)] mod tests { ... }` block's contents
+are unchanged from Task 2 — only the `use` block is new, inserted between
+them.)
 
 - [ ] **Step 2: Implement the shared client and `get`**
 
@@ -674,7 +694,16 @@ chmod +x scripts/forgejo-dev.sh
 - [ ] **Step 3: Run it and verify by hand**
 
 Run: `./scripts/forgejo-dev.sh`
-Expected: prints the two `export` lines with no errors. If any `curl` step fails (non-`|| true` ones), read the response body (drop `-sf` temporarily to see it) and fix the endpoint/field name against what this specific Forgejo version actually returns — the API shape in this script is based on documented Gitea/Forgejo API conventions, not verified against a live instance yet, so this step is the first real check of it.
+Expected: prints the two `export` lines with no errors, and the token line
+is a non-empty string (not `null` or empty — if it is, the token-creation
+response's JSON field isn't actually named `sha1` on this Forgejo version;
+drop `-sf` on that one `curl` call temporarily, print the raw response, and
+fix the `jq` filter to match the real field name). If any other `curl` step
+fails (the non-`|| true` ones), read the response body the same way (drop
+`-sf` to see it) and fix the endpoint/field name against what this specific
+Forgejo version actually returns — the API shape in this script is based on
+documented Gitea/Forgejo API conventions, not verified against a live
+instance yet, so this step is the first real check of it.
 
 Then manually verify the fixture data is queryable:
 
