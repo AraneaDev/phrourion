@@ -31,7 +31,7 @@ mod tests {
             EXIT_FRAMES, SCENE_WIDTH, STARTUP_DURATION_MS, STARTUP_FRAMES, draw_animation,
             exit_scene, exit_skips, startup_scene, startup_skips,
         },
-        app::AttentionPriority,
+        app::{AttentionPriority, known_count},
         cache::CACHE_PLACEHOLDER,
         draw::{
             CellState, action_message, attention_priority_color, cell_state, count, count_color,
@@ -637,5 +637,55 @@ mod tests {
         assert_eq!(position(2), (13, 9));
         assert_eq!(position(3), (18, 9));
         assert_eq!(position(4), (18, 7));
+    }
+
+    #[test]
+    fn known_count_is_zero_unless_supported_and_error_free() {
+        let ok: Observation<Vec<String>> = Observation::success(vec!["a".into(), "b".into()]);
+        assert_eq!(known_count(&ok), 2);
+
+        // Stale data alongside a fresh error must not be counted as known.
+        let mut errored: Observation<Vec<String>> = Observation::failure("boom");
+        errored.data = Some(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(known_count(&errored), 0);
+
+        // A disabled feature's leftover data (e.g. from cache) must not
+        // be counted either.
+        let mut unsupported: Observation<Vec<String>> = Observation::unsupported();
+        unsupported.data = Some(vec!["a".into()]);
+        assert_eq!(known_count(&unsupported), 0);
+    }
+
+    #[test]
+    fn attention_reports_unpushed_before_incoming_exactly_at_the_boundary() {
+        let local = |ahead, behind| LocalState {
+            upstream: "origin/main".into(),
+            ahead,
+            behind,
+            ..LocalState::default()
+        };
+        let row = |ahead, behind| test_row(local(ahead, behind));
+
+        // Neither branch should fire when both counts are exactly zero.
+        let (_, reason) = row(0, 0).attention();
+        assert_ne!(reason, "0 unpushed");
+        assert_ne!(reason, "0 incoming");
+
+        assert_eq!(row(1, 0).attention().1, "1 unpushed");
+        assert_eq!(row(0, 1).attention().1, "1 incoming");
+    }
+
+    #[test]
+    fn record_trims_the_log_to_at_most_100_entries() {
+        let mut app = App::new(Vec::new());
+        for i in 0..100 {
+            app.record(format!("entry {i}"));
+        }
+        assert_eq!(app.log.len(), 100);
+        assert_eq!(app.log[0], "entry 0");
+
+        app.record("entry 100");
+        assert_eq!(app.log.len(), 100, "log must stay capped at 100 entries");
+        assert_eq!(app.log[0], "entry 1", "the oldest entry must be dropped");
     }
 }
