@@ -48,4 +48,6 @@ registry is large enough to need grouping.
 
 - **Rate-limit-aware backoff for `gh api`** — detect GitHub 403/429 responses
   and retry with backoff instead of surfacing a hard failure. Matters more
-  once Issues and requested-reviews add API calls per refresh. *Not started.*
+  once Issues and requested-reviews add API calls per refresh. *Shipped*
+  (up to 3 attempts, 1s/2s exponential backoff, matched on stderr phrasing
+  since `gh api` doesn't expose structured status codes to the caller).

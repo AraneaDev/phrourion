@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, time::Duration};
 
 pub type SnapshotFuture<'a> = Pin<Box<dyn Future<Output = RemoteState> + Send + 'a>>;
 
@@ -42,6 +42,16 @@ impl RemoteProvider for Unsupported {
 
 pub struct Github;
 
+const RATE_LIMIT_ATTEMPTS: u32 = 3;
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
+
+// gh reports both primary and secondary rate limits as plain text on stderr, no
+// structured status; matching a substring is the only signal command::run exposes.
+fn is_rate_limited(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("rate limit") || lower.contains("http 429")
+}
+
 async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
     let executable = std::env::var("PHROURION_GH").unwrap_or_else(|_| "gh".into());
     let mut args = vec![
@@ -55,8 +65,19 @@ async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
     if pages {
         args.extend(["--paginate", "--slurp"]);
     }
-    let text = command::run(&executable, &args, &repo.path).await?;
-    serde_json::from_str(&text).context("Invalid provider JSON")
+    let mut backoff = RATE_LIMIT_BACKOFF;
+    let mut attempts_left = RATE_LIMIT_ATTEMPTS;
+    loop {
+        attempts_left -= 1;
+        match command::run(&executable, &args, &repo.path).await {
+            Ok(text) => return serde_json::from_str(&text).context("Invalid provider JSON"),
+            Err(e) if attempts_left > 0 && is_rate_limited(&e.to_string()) => {
+                tokio::time::sleep(backoff).await;
+                backoff *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 pub fn flatten_pages(value: Value, key: Option<&str>) -> Result<Vec<Value>> {
@@ -378,6 +399,19 @@ mod tests {
         assert_eq!(flatten_pages(json!([[1], [2, 3]]), None).unwrap().len(), 3);
         assert!(flatten_pages(json!([[1], {"message":"denied"}]), None).is_err());
         assert!(flatten_pages(json!({"message":"denied"}), None).is_err());
+    }
+
+    #[test]
+    fn rate_limit_detection_matches_ghs_stderr_phrasing_only() {
+        assert!(is_rate_limited(
+            "gh: API rate limit exceeded for user ID 123. (HTTP 403)"
+        ));
+        assert!(is_rate_limited(
+            "gh: You have exceeded a secondary rate limit. (HTTP 403)"
+        ));
+        assert!(is_rate_limited("gh: (HTTP 429)"));
+        assert!(!is_rate_limited("gh: Not Found (HTTP 404)"));
+        assert!(!is_rate_limited("gh: Bad credentials (HTTP 401)"));
     }
 
     #[test]
