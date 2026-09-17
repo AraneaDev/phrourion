@@ -13,13 +13,16 @@ ordered by priority within a group; status reflects what has actually shipped.
   the authenticated `gh` user is a requested reviewer. The "waiting on me"
   signal, distinct from the existing PR list. *Shipped* (individual reviewer
   requests only; team review requests aren't resolved to "is this me").
-- **GitLab, Forgejo, Bitbucket adapters** — same `RemoteProvider` shape as
-  GitHub's. *Deprioritized:* staying GitHub-only for now; revisit once the
-  GitHub-side backlog is done. (A Forgejo API shape was scoped during
-  brainstorming — see git history if picking this back up: default branch,
-  branches use `commit.id` not `commit.sha`, issues filter server-side via
-  `?type=issues`, auth is `Authorization: token <value>` sourced from a
-  per-host env var, no bundled CLI equivalent to `gh` so it'd go over HTTP.)
+- **Forgejo adapter** — same `RemoteProvider` shape as GitHub's, over HTTP
+  (no bundled CLI equivalent to `gh` exists for Forgejo). *Shipped* (default
+  branch, branches, PRs, issues, releases, CI via commit-status; publication
+  and review_requests stay `unsupported`; token sourced from a per-host env
+  var, optional for public repos; tested against a local Docker fixture, see
+  `docs/superpowers/specs/2026-09-17-forgejo-adapter-design.md`).
+- **GitLab, Bitbucket adapters** — *Deprioritized:* GitLab may use `glab api`
+  instead of raw HTTP like Forgejo's adapter, which needs checking before
+  assuming it follows the same shape; Bitbucket Cloud and Server/Data Center
+  need separate identification since their APIs differ.
 
 ## New actions
 
