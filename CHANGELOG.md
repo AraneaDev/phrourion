@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/AraneaDev/phrourion/compare/v0.2.0...v0.3.0) (2026-09-17)
+
+
+### Features
+
+* add a Forgejo/Gitea adapter ([#14](https://github.com/AraneaDev/phrourion/issues/14)) ([6b4f3cb](https://github.com/AraneaDev/phrourion/commit/6b4f3cb14baa5fd096fefd10fe7034bcd2a201f8))
+
 ## [0.2.0](https://github.com/AraneaDev/phrourion/compare/v0.1.3...v0.2.0) (2026-09-17)
 
 
