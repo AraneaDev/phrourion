@@ -75,18 +75,22 @@ when XDG is not available. It stores paths and remote identities, not tokens.
 ## Actions
 
 The dashboard is read-only until you choose an action. It can refresh local and
-remote state, open a repository in the browser, add or remove a checkout, and
-pull the selected repository after confirmation.
+remote state, open a repository in the browser, add or remove a checkout, pull
+the selected repository after confirmation, and check out a pull request's
+branch by number.
 
 A pull is allowed only when the checkout is still the registered one, the branch
 is attached and unchanged, the working tree is clean, the upstream is configured,
-and the update is fast-forward only. Phrourion never switches branches, stashes
-changes, resets, rebases, or resolves conflicts.
+and the update is fast-forward only. A PR checkout is allowed only when the
+working tree is clean and no local branch already has the target name; it fetches
+GitHub's `refs/pull/<number>/head` and creates a new local branch (`pr/<number>`)
+from it. Phrourion never stashes changes, resets, rebases, or resolves conflicts.
 
 ```text
 r       refresh the selected repository
 R       refresh all repositories
 p       preview and confirm a fast-forward pull
+c       check out a pull request's branch by number
 o       open the repository in a browser
 a       add a repository
 d       remove a repository

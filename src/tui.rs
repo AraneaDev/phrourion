@@ -1,5 +1,5 @@
 use crate::{
-    git::{self, LocalState, PullPreview},
+    git::{self, CheckoutPreview, LocalState, PullPreview},
     model::{Observation, RemoteState, Repo, clean},
     provider, registry,
 };
@@ -86,6 +86,7 @@ enum Message {
     Remote(String, Box<RemoteState>),
     Fetched(String, Result<()>),
     Preview(Box<Result<PullPreview>>),
+    CheckoutPreview(Box<Result<CheckoutPreview>>),
     Action(Result<String>),
     Added(Result<()>),
 }
@@ -95,6 +96,8 @@ enum Mode {
     Add(String),
     Filter,
     Confirm(Box<PullPreview>),
+    Checkout(String),
+    ConfirmCheckout(Box<CheckoutPreview>),
     Remove(String),
     Help,
 }
@@ -919,10 +922,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Add(s) => format!("Add: PATH | REMOTE (remote optional): {}  [Enter save / Esc cancel]", clean(s)),
         Mode::Filter => "Type filter, Enter done, Esc clear".into(),
         Mode::Confirm(p) => format!("Pull {} [{}] {} -> {} ({} commits)? y / n", clean(&p.repo.path.display().to_string()), clean(&p.before.branch), &p.before.head[..7.min(p.before.head.len())], &p.target[..7.min(p.target.len())], p.before.behind),
+        Mode::Checkout(s) => format!("Checkout PR number: {}  [Enter preview / Esc cancel]", clean(s)),
+        Mode::ConfirmCheckout(p) => format!("Checkout PR #{} as {} in {}? y / n", p.number, clean(&p.branch), clean(&p.repo.path.display().to_string())),
         Mode::Remove(name) => format!("Remove {} from registry only? y / n", clean(name)),
-        Mode::Help => "j/k move | 1-6 tabs | PgUp/PgDn scroll | a add | d remove | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
+        Mode::Help => "j/k move | 1-6 tabs | PgUp/PgDn scroll | a add | d remove | c checkout PR | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
         Mode::Normal if app.action_busy => format!("{} action running... monitoring remains available", spinner_frame(animation_frame())),
-        Mode::Normal => "a add  d remove  / filter  1-6 details  r refresh  p pull  o browser  ? help  q quit".into(),
+        Mode::Normal => "a add  d remove  c checkout PR  / filter  1-6 details  r refresh  p pull  o browser  ? help  q quit".into(),
     };
     let mut footer = vec![Line::from(vec![
         Span::styled(
@@ -1087,6 +1092,13 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                         Err(e) => app.record(e),
                     }
                 }
+                Message::CheckoutPreview(result) => {
+                    app.action_busy = false;
+                    match *result {
+                        Ok(p) => app.mode = Mode::ConfirmCheckout(Box::new(p)),
+                        Err(e) => app.record(e),
+                    }
+                }
                 Message::Action(result) => {
                     app.action_busy = false;
                     app.record(match result {
@@ -1188,6 +1200,47 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                     KeyCode::Esc | KeyCode::Char('n') => app.mode = Mode::Normal,
                     _ => {}
                 },
+                Mode::Checkout(input) => match key.code {
+                    KeyCode::Esc => app.mode = Mode::Normal,
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => input.push(c),
+                    KeyCode::Enter => {
+                        let number = input.trim().parse::<u64>().ok();
+                        match (number, app.current()) {
+                            (Some(number), Some(i)) => {
+                                let repo = app.rows[i].repo.clone();
+                                let tx = tx.clone();
+                                app.mode = Mode::Normal;
+                                app.action_busy = true;
+                                tasks.spawn(async move {
+                                    let _ = tx.send(Message::CheckoutPreview(Box::new(
+                                        git::checkout_preview(&repo, number).await,
+                                    )));
+                                });
+                            }
+                            _ => {
+                                app.record("Enter a PR number to checkout");
+                                app.mode = Mode::Normal;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Mode::ConfirmCheckout(preview) => match key.code {
+                    KeyCode::Char('y') => {
+                        let preview = preview.clone();
+                        let tx = tx.clone();
+                        app.mode = Mode::Normal;
+                        app.action_busy = true;
+                        tasks.spawn(async move {
+                            let _ = tx.send(Message::Action(git::checkout_apply(&preview).await));
+                        });
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') => app.mode = Mode::Normal,
+                    _ => {}
+                },
                 Mode::Remove(id) => match key.code {
                     KeyCode::Char('y') => {
                         let id = id.clone();
@@ -1221,6 +1274,11 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                     KeyCode::Char('d') if !app.action_busy => {
                         if let Some(i) = app.current() {
                             app.mode = Mode::Remove(app.rows[i].repo.id.clone());
+                        }
+                    }
+                    KeyCode::Char('c') if !app.action_busy => {
+                        if app.current().is_some() {
+                            app.mode = Mode::Checkout(String::new());
                         }
                     }
                     KeyCode::Char(c @ '1'..='6') => {

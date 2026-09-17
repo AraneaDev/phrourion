@@ -239,6 +239,95 @@ pub async fn preview(repo: &Repo) -> Result<PullPreview> {
     })
 }
 
+#[derive(Clone, Debug)]
+pub struct CheckoutPreview {
+    pub repo: Repo,
+    pub before: LocalState,
+    pub number: u64,
+    pub branch: String,
+    pub target: String,
+}
+
+fn checkout_eligible(s: &LocalState) -> Result<()> {
+    if s.dirty() {
+        bail!("Working tree has uncommitted or untracked changes");
+    }
+    if s.operation {
+        bail!("A Git operation is in progress");
+    }
+    Ok(())
+}
+
+fn has_local_branch(s: &LocalState, branch: &str) -> bool {
+    s.branches
+        .iter()
+        .any(|b| b.split_whitespace().next() == Some(branch))
+}
+
+pub async fn checkout_preview(repo: &Repo, number: u64) -> Result<CheckoutPreview> {
+    let _lock = lock(repo).await?;
+    identity(repo).await?;
+    let initial = snapshot(repo).await?;
+    checkout_eligible(&initial)?;
+    let branch = format!("pr/{number}");
+    if has_local_branch(&initial, &branch) {
+        bail!("Local branch {branch} already exists");
+    }
+    run(
+        &repo.path,
+        &[
+            "fetch",
+            "--",
+            &repo.remote,
+            &format!("refs/pull/{number}/head"),
+        ],
+    )
+    .await?;
+    let target = run(
+        &repo.path,
+        &["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
+    )
+    .await?;
+    let before = snapshot(repo).await?;
+    checkout_eligible(&before)?;
+    if initial.head != before.head || initial.branch != before.branch {
+        bail!("Checkout changed during fetch; try again");
+    }
+    Ok(CheckoutPreview {
+        repo: repo.clone(),
+        before,
+        number,
+        branch,
+        target,
+    })
+}
+
+pub async fn checkout_apply(preview: &CheckoutPreview) -> Result<String> {
+    let repo = &preview.repo;
+    let _lock = lock(repo).await?;
+    identity(repo).await?;
+    let current = snapshot(repo).await?;
+    checkout_eligible(&current)?;
+    if current != preview.before {
+        bail!("Checkout changed since preview; request a new checkout preview");
+    }
+    if has_local_branch(&current, &preview.branch) {
+        bail!("Local branch {} already exists", preview.branch);
+    }
+    run(
+        &repo.path,
+        &["checkout", "-b", &preview.branch, &preview.target],
+    )
+    .await?;
+    Ok(format!(
+        "{}\ncheckout PR #{} -> {} ({})",
+        repo.path.display(),
+        preview.number,
+        preview.branch,
+        &preview.target[..7.min(preview.target.len())]
+    ))
+}
+
 pub async fn apply(preview: &PullPreview) -> Result<String> {
     let repo = &preview.repo;
     let _lock = lock(repo).await?;

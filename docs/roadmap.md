@@ -25,7 +25,13 @@ ordered by priority within a group; status reflects what has actually shipped.
 
 - **Checkout a PR's branch locally** — allowed only when the working tree is
   clean, same guard family as the existing fast-forward pull: fetch + switch,
-  no stash/reset. *Not started.*
+  no stash/reset. *Shipped.* Fetches GitHub's `refs/pull/<number>/head` (works
+  for same-repo and fork-originated PRs alike, no fork remote needed) into a
+  new local branch `pr/<number>`; refuses if that branch name is already
+  taken or the tree isn't clean, and re-verifies nothing changed between
+  preview and apply, mirroring `git::preview`/`git::apply` for pull. PR
+  selection is a typed number (press `c`), not a selectable list — the
+  dashboard has no per-item list selection anywhere yet.
 
 Deliberately dropped this round: creating a branch from an issue (revisit once
 Issues support sees real use), and any comment/close/merge action from the TUI
