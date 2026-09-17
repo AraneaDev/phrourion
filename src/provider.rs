@@ -28,6 +28,7 @@ impl RemoteProvider for Unsupported {
                 default_branch: Observation::unsupported(),
                 branches: Observation::unsupported(),
                 prs: Observation::unsupported(),
+                issues: Observation::unsupported(),
                 proposals: Observation::unsupported(),
                 drafts: Observation::unsupported(),
                 published: Observation::unsupported(),
@@ -118,6 +119,25 @@ fn pr_item(v: &Value) -> Item {
     }
 }
 
+// GitHub's issues endpoint also returns pull requests; only the latter carry this key.
+fn is_pull_request(v: &Value) -> bool {
+    !v["pull_request"].is_null()
+}
+
+fn issue_item(v: &Value) -> Item {
+    Item {
+        title: format!("#{} {}", v["number"], text(v, "title")),
+        url: text(v, "html_url"),
+        detail: v["labels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|l| l["name"].as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 fn run_item(v: &Value) -> Item {
     Item {
         title: text(v, "name"),
@@ -147,10 +167,12 @@ impl RemoteProvider for Github {
             }
             let branches_url = format!("{base}/branches?per_page=100");
             let prs_url = format!("{base}/pulls?state=open&per_page=100");
+            let issues_url = format!("{base}/issues?state=open&per_page=100");
             let releases_url = format!("{base}/releases?per_page=100");
-            let (branches, prs, releases) = tokio::join!(
+            let (branches, prs, issues, releases) = tokio::join!(
                 api(repo, &branches_url, true),
                 api(repo, &prs_url, true),
+                api(repo, &issues_url, true),
                 api(repo, &releases_url, true)
             );
             state.branches = match branches.and_then(|v| flatten_pages(v, None)) {
@@ -185,6 +207,15 @@ impl RemoteProvider for Github {
                     state.proposals = Observation::failure(e);
                 }
             }
+            state.issues = match issues.and_then(|v| flatten_pages(v, None)) {
+                Ok(rows) => Observation::success(
+                    rows.iter()
+                        .filter(|v| !is_pull_request(v))
+                        .map(issue_item)
+                        .collect(),
+                ),
+                Err(e) => Observation::failure(e),
+            };
             match releases.and_then(|v| flatten_pages(v, None)) {
                 Ok(rows) => {
                     let item = |v: &Value| Item {
@@ -325,6 +356,27 @@ mod tests {
         assert_eq!(flatten_pages(json!([[1], [2, 3]]), None).unwrap().len(), 3);
         assert!(flatten_pages(json!([[1], {"message":"denied"}]), None).is_err());
         assert!(flatten_pages(json!({"message":"denied"}), None).is_err());
+    }
+
+    #[test]
+    fn issue_listing_excludes_pull_requests_and_joins_labels() {
+        let issue = json!({
+            "number": 42,
+            "title": "Crash on empty registry",
+            "html_url": "https://github.com/o/r/issues/42",
+            "labels": [{"name": "bug"}, {"name": "triage"}],
+        });
+        let pr = json!({
+            "number": 43,
+            "title": "Fix crash",
+            "pull_request": {"url": "https://api.github.com/repos/o/r/pulls/43"},
+        });
+        assert!(!is_pull_request(&issue));
+        assert!(is_pull_request(&pr));
+        let item = issue_item(&issue);
+        assert_eq!(item.title, "#42 Crash on empty registry");
+        assert_eq!(item.url, "https://github.com/o/r/issues/42");
+        assert_eq!(item.detail, "bug, triage");
     }
 
     #[test]

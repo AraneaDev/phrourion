@@ -51,8 +51,8 @@ For every registered repository, Phrourion reports:
   staged changes, untracked files, conflicts, and Git operations in progress
 - **remote state**, including the default branch, branch position, and provider
   reachability
-- **open work**, including pull requests and release proposals detected from
-  explicit branch, label, and title evidence
+- **open work**, including pull requests, open issues, and release proposals
+  detected from explicit branch, label, and title evidence
 - **pending releases**, separating proposed, draft, and published release data
 - **checks**, including the configured workflow runs and their current result
 
@@ -155,7 +155,7 @@ git config core.hooksPath .githooks
 ```
 
 See [the design notes](docs/design.md) for the architecture, safety model, and
-provider boundary.
+provider boundary, and [the roadmap](docs/roadmap.md) for what's planned next.
 
 ## License
 
