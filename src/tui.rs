@@ -59,7 +59,7 @@ impl RowState {
         if local.is_some_and(|s| !s.upstream.is_empty() && s.ahead > 0 && s.behind > 0) {
             return (Problem, "Diverged".into());
         }
-        if ci_label(&self.remote) == "fail" {
+        if ci_failed_confirmed(&self.remote) {
             return (Problem, "CI failed".into());
         }
         if let Some(s) = local.filter(|s| !s.upstream.is_empty()) {
@@ -261,22 +261,28 @@ fn cache_path(repo: &Repo) -> Option<PathBuf> {
     )
 }
 
+// The placeholder `cached()` attaches to every field before this session's
+// own fetch resolves it one way or the other. Rendering code checks for this
+// exact string to distinguish it from a real fetch failure, so a repo that
+// hasn't actually failed this session isn't shown as errored.
+const CACHE_PLACEHOLDER: &str = "Cached; awaiting refresh";
+
 fn cached(repo: &Repo) -> RemoteState {
     let state: Option<RemoteState> = cache_path(repo)
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|s| serde_json::from_slice(&s).ok());
     if let Some(state) = state {
         let unavailable = RemoteState {
-            default_branch: Observation::failure("Cached; awaiting refresh"),
-            branches: Observation::failure("Cached; awaiting refresh"),
-            prs: Observation::failure("Cached; awaiting refresh"),
-            review_requests: Observation::failure("Cached; awaiting refresh"),
-            issues: Observation::failure("Cached; awaiting refresh"),
-            proposals: Observation::failure("Cached; awaiting refresh"),
-            drafts: Observation::failure("Cached; awaiting refresh"),
-            published: Observation::failure("Cached; awaiting refresh"),
-            ci: Observation::failure("Cached; awaiting refresh"),
-            publication: Observation::failure("Cached; awaiting refresh"),
+            default_branch: Observation::failure(CACHE_PLACEHOLDER),
+            branches: Observation::failure(CACHE_PLACEHOLDER),
+            prs: Observation::failure(CACHE_PLACEHOLDER),
+            review_requests: Observation::failure(CACHE_PLACEHOLDER),
+            issues: Observation::failure(CACHE_PLACEHOLDER),
+            proposals: Observation::failure(CACHE_PLACEHOLDER),
+            drafts: Observation::failure(CACHE_PLACEHOLDER),
+            published: Observation::failure(CACHE_PLACEHOLDER),
+            ci: Observation::failure(CACHE_PLACEHOLDER),
+            publication: Observation::failure(CACHE_PLACEHOLDER),
         };
         unavailable.retain_previous(&state)
     } else {
@@ -368,17 +374,60 @@ impl App {
     }
 }
 
-fn count<T>(value: &Observation<Vec<T>>) -> String {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CellState {
+    Data,
+    Loading,
+    Error,
+    Unsupported,
+}
+
+// Always prefer showing real data when present, even if a stale-cache
+// placeholder or a real error is also set (retain_previous backfills data
+// from a prior successful fetch without clearing the accompanying error).
+fn cell_state<T>(value: &Observation<T>) -> CellState {
     if !value.supported {
-        "n/a".into()
-    } else if value.error.is_some() {
-        "unknown".into()
+        CellState::Unsupported
+    } else if value.data.is_some() {
+        CellState::Data
+    } else if value.error.is_none() || value.error.as_deref() == Some(CACHE_PLACEHOLDER) {
+        CellState::Loading
     } else {
-        value
-            .data
-            .as_ref()
-            .map(|v| v.len().to_string())
-            .unwrap_or_else(|| "...".into())
+        CellState::Error
+    }
+}
+
+// The more attention-worthy of two states, for a cell that combines two
+// observations (e.g. "proposals / drafts") into one displayed value.
+fn worse_state(a: CellState, b: CellState) -> CellState {
+    fn rank(s: CellState) -> u8 {
+        match s {
+            CellState::Error => 0,
+            CellState::Loading => 1,
+            CellState::Unsupported => 2,
+            CellState::Data => 3,
+        }
+    }
+    if rank(a) <= rank(b) { a } else { b }
+}
+
+// Placeholder states (loading/error/unsupported) get a muted, consistent
+// treatment regardless of column; only real data earns the column's own
+// color, so a wall of "…" or "n/a" doesn't compete visually with real counts.
+fn state_color(cell: CellState, data_color: Color) -> Color {
+    match cell {
+        CellState::Data => data_color,
+        CellState::Loading | CellState::Unsupported => Color::DarkGray,
+        CellState::Error => Color::Red,
+    }
+}
+
+fn count<T>(value: &Observation<Vec<T>>) -> String {
+    match cell_state(value) {
+        CellState::Unsupported => "n/a".into(),
+        CellState::Loading => "…".into(),
+        CellState::Error => "!".into(),
+        CellState::Data => value.data.as_ref().unwrap().len().to_string(),
     }
 }
 
@@ -461,7 +510,7 @@ fn triage(app: &App) -> (usize, usize, usize, usize, usize, usize, String) {
             dirty += usize::from(local.dirty());
             behind += usize::from(local.behind > 0);
         }
-        failures += usize::from(ci_label(&row.remote) == "fail");
+        failures += usize::from(ci_failed_confirmed(&row.remote));
         prs += known_count(&row.remote.prs);
         releases += known_count(&row.remote.proposals) + known_count(&row.remote.drafts);
     }
@@ -568,52 +617,63 @@ fn status_color(row: &RowState) -> Color {
     }
 }
 
+const CI_FAIL_MARKERS: &[&str] = &[
+    "failure",
+    "timed_out",
+    "cancelled",
+    "action_required",
+    "error",
+    "warning",
+];
+
+// A confirmed-fresh CI failure, for attention ranking only. Deliberately
+// stricter than ci_label(): a stale or currently-errored check is not a
+// confirmed attention signal (see README's "Actions" section), even though
+// the table still displays its last-known value via ci_label().
+fn ci_failed_confirmed(state: &RemoteState) -> bool {
+    let observation = &state.ci;
+    observation.supported
+        && observation.error.is_none()
+        && observation.data.as_ref().is_some_and(|v| {
+            v.iter()
+                .any(|i| CI_FAIL_MARKERS.iter().any(|s| i.detail.contains(s)))
+        })
+}
+
 fn ci_label(state: &RemoteState) -> String {
     let observation = &state.ci;
-    if !observation.supported {
-        return "n/a".into();
+    let v = match cell_state(observation) {
+        CellState::Unsupported => return "n/a".into(),
+        CellState::Loading => return "…".into(),
+        CellState::Error => return "!".into(),
+        CellState::Data => observation.data.as_ref().unwrap(),
+    };
+    if v.is_empty() {
+        return "absent".into();
     }
-    if observation.error.is_some() {
-        return "unknown".into();
+    if v.iter()
+        .any(|i| CI_FAIL_MARKERS.iter().any(|s| i.detail.contains(s)))
+    {
+        return "fail".into();
     }
-    match &observation.data {
-        None => "...".into(),
-        Some(v) if v.is_empty() => "absent".into(),
-        Some(v)
-            if v.iter().any(|i| {
-                [
-                    "failure",
-                    "timed_out",
-                    "cancelled",
-                    "action_required",
-                    "error",
-                ]
-                .iter()
-                .any(|s| i.detail.contains(s))
-            }) =>
-        {
-            "fail".into()
-        }
-        Some(v)
-            if v.iter().any(|i| {
-                ["queued", "pending", "in_progress", "waiting", "requested"]
-                    .iter()
-                    .any(|s| i.detail.contains(s))
-            }) =>
-        {
-            "running".into()
-        }
-        Some(v)
-            if v.iter().all(|i| {
-                ["success", "neutral", "skipped"]
-                    .iter()
-                    .any(|s| i.detail.contains(s))
-            }) =>
-        {
-            "pass".into()
-        }
-        _ => "unknown".into(),
+    if v.iter().any(|i| {
+        ["queued", "pending", "in_progress", "waiting", "requested"]
+            .iter()
+            .any(|s| i.detail.contains(s))
+    }) {
+        return "running".into();
     }
+    if v.iter().all(|i| {
+        ["success", "neutral", "skipped"]
+            .iter()
+            .any(|s| i.detail.contains(s))
+    }) {
+        return "pass".into();
+    }
+    // Real CI data that doesn't map cleanly to a known conclusion string
+    // (e.g. a status context this matcher doesn't recognize yet) — distinct
+    // from a fetch failure, so it gets its own label rather than "unknown".
+    "other".into()
 }
 
 fn items(label: &str, observation: &Observation<Vec<crate::model::Item>>) -> String {
@@ -730,9 +790,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         local: String,
         sync: String,
         prs: String,
+        prs_color: Color,
         review: String,
+        review_color: Color,
         issues: String,
+        issues_color: Color,
         rel_draft: String,
+        rel_draft_color: Color,
         ci: String,
         tone: Color,
         ci_color: Color,
@@ -754,7 +818,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
                     },
                     s.sync(),
                 ),
-                None => ("?".into(), r.local.label(), "unknown".into()),
+                None => {
+                    let placeholder = match cell_state(&r.local) {
+                        CellState::Error => "!",
+                        _ => "…",
+                    };
+                    ("?".into(), r.local.label(), placeholder.into())
+                }
             };
             let local = if r.local.error.is_some() {
                 r.local.label()
@@ -762,11 +832,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 local
             };
             let ci = ci_label(&r.remote);
-            let ci_color = if ci == "fail" {
-                Color::Red
-            } else {
-                Color::Green
+            let ci_color = match ci.as_str() {
+                "fail" => Color::Red,
+                "running" => Color::Yellow,
+                "pass" => Color::Green,
+                "!" => Color::Red,
+                _ => Color::DarkGray, // "n/a", "…", "absent", "other"
             };
+            let rel_draft_color = state_color(
+                worse_state(
+                    cell_state(&r.remote.proposals),
+                    cell_state(&r.remote.drafts),
+                ),
+                Color::Yellow,
+            );
             RowText {
                 repo_label: format!("{} {}", health_glyph(r), clean(&r.repo.name)),
                 attention: r.attention().1,
@@ -774,13 +853,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 local,
                 sync,
                 prs: count(&r.remote.prs),
+                prs_color: state_color(cell_state(&r.remote.prs), Color::Magenta),
                 review: count(&r.remote.review_requests),
+                review_color: state_color(
+                    cell_state(&r.remote.review_requests),
+                    Color::LightMagenta,
+                ),
                 issues: count(&r.remote.issues),
+                issues_color: state_color(cell_state(&r.remote.issues), Color::Cyan),
                 rel_draft: format!(
                     "{} / {}",
                     count(&r.remote.proposals),
                     count(&r.remote.drafts)
                 ),
+                rel_draft_color,
                 ci,
                 tone: status_color(r),
                 ci_color,
@@ -820,10 +906,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         cells.push(right(r.sync, Style::default().fg(r.tone)));
         if !narrow {
             cells.extend([
-                right(r.prs, Style::default().fg(Color::Magenta)),
-                right(r.review, Style::default().fg(Color::LightMagenta)),
-                right(r.issues, Style::default().fg(Color::Cyan)),
-                right(r.rel_draft, Style::default().fg(Color::Yellow)),
+                right(r.prs, Style::default().fg(r.prs_color)),
+                right(r.review, Style::default().fg(r.review_color)),
+                right(r.issues, Style::default().fg(r.issues_color)),
+                right(r.rel_draft, Style::default().fg(r.rel_draft_color)),
                 right(r.ci, Style::default().fg(r.ci_color)),
             ]);
         }
@@ -896,6 +982,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 if let Some(e) = &row.local.error {
                     details.push_str(&format!("{}\n", clean(e)));
                 }
+                let default_branch_placeholder = match cell_state(&row.remote.default_branch) {
+                    CellState::Error => "!",
+                    _ => "…",
+                };
                 details.push_str(&format!(
                     "Default branch: {} [{}]\n",
                     clean(
@@ -903,7 +993,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                             .default_branch
                             .data
                             .as_deref()
-                            .unwrap_or("unknown")
+                            .unwrap_or(default_branch_placeholder)
                     ),
                     row.remote.default_branch.label()
                 ));
@@ -1653,8 +1743,63 @@ mod tests {
     #[test]
     fn error_counts_never_look_like_zero() {
         let o: Observation<Vec<String>> = Observation::failure("denied");
-        assert_eq!(count(&o), "unknown");
+        assert_eq!(count(&o), "!");
         assert_eq!(count(&Observation::<Vec<String>>::success(vec![])), "0");
+    }
+
+    #[test]
+    fn cell_state_prefers_data_over_a_stale_or_real_error() {
+        let never_fetched: Observation<Vec<String>> = Observation::default();
+        assert_eq!(cell_state(&never_fetched), CellState::Loading);
+
+        let stale_placeholder: Observation<Vec<String>> = Observation::failure(CACHE_PLACEHOLDER);
+        assert_eq!(cell_state(&stale_placeholder), CellState::Loading);
+
+        let real_error: Observation<Vec<String>> = Observation::failure("denied");
+        assert_eq!(cell_state(&real_error), CellState::Error);
+
+        let unsupported: Observation<Vec<String>> = Observation::unsupported();
+        assert_eq!(cell_state(&unsupported), CellState::Unsupported);
+
+        let with_data: Observation<Vec<String>> = Observation::success(vec!["x".into()]);
+        assert_eq!(cell_state(&with_data), CellState::Data);
+
+        // retain_previous backfills `data` from a prior successful fetch
+        // without clearing the placeholder error — data must still win.
+        let mut stale_but_has_data: Observation<Vec<String>> =
+            Observation::failure(CACHE_PLACEHOLDER);
+        stale_but_has_data.data = Some(vec!["cached".into()]);
+        assert_eq!(cell_state(&stale_but_has_data), CellState::Data);
+    }
+
+    #[test]
+    fn worse_state_prioritizes_error_over_loading_over_unsupported_over_data() {
+        assert_eq!(
+            worse_state(CellState::Data, CellState::Error),
+            CellState::Error
+        );
+        assert_eq!(
+            worse_state(CellState::Loading, CellState::Unsupported),
+            CellState::Loading
+        );
+        assert_eq!(
+            worse_state(CellState::Data, CellState::Data),
+            CellState::Data
+        );
+    }
+
+    #[test]
+    fn state_color_only_uses_the_data_color_for_real_data() {
+        assert_eq!(state_color(CellState::Data, Color::Magenta), Color::Magenta);
+        assert_eq!(
+            state_color(CellState::Loading, Color::Magenta),
+            Color::DarkGray
+        );
+        assert_eq!(
+            state_color(CellState::Unsupported, Color::Magenta),
+            Color::DarkGray
+        );
+        assert_eq!(state_color(CellState::Error, Color::Magenta), Color::Red);
     }
 
     #[test]
@@ -1760,7 +1905,7 @@ mod tests {
             .expect("sync value should not be truncated");
         let reldraft_end = lines
             .iter()
-            .find_map(|l| find_end(l, "unknown / unknown"))
+            .find_map(|l| find_end(l, "! / !"))
             .expect("rel/draft value should not be truncated");
         let header_line = lines
             .iter()
