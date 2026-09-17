@@ -35,7 +35,8 @@ mod tests {
         cache::CACHE_PLACEHOLDER,
         draw::{
             CellState, action_message, attention_priority_color, cell_state, count, count_color,
-            count_color_combined, health_glyph, meter, spinner_frame, state_color, worse_state,
+            count_color_combined, health_glyph, meter, spinner_frame, state_color, triage,
+            worse_state,
         },
         event_loop::{entered_notice_tier, notify_script},
     };
@@ -413,6 +414,10 @@ mod tests {
             action_message(0, 0, 0, 1, 2),
             "review 1 release and 2 pull requests"
         );
+        // Isolated (only one of releases/prs nonzero) so the combined
+        // releases>0 && prs>0 branch is provably not what fired here.
+        assert_eq!(action_message(0, 0, 0, 1, 0), "review 1 release");
+        assert_eq!(action_message(0, 0, 0, 0, 1), "review 1 pull request");
         assert_eq!(action_message(0, 0, 0, 0, 0), "all clear");
     }
 
@@ -523,6 +528,73 @@ mod tests {
 
         row.local.data = Some(LocalState::default());
         assert_eq!(health_glyph(&row), "●");
+    }
+
+    #[test]
+    fn health_glyph_shows_error_glyph_when_any_single_source_errors() {
+        let mut local_errors = test_row(LocalState::default());
+        local_errors.local = Observation::failure("boom");
+        assert_eq!(health_glyph(&local_errors), "!");
+
+        let mut branch_errors = test_row(LocalState::default());
+        branch_errors.remote.default_branch = Observation::failure("boom");
+        assert_eq!(health_glyph(&branch_errors), "!");
+
+        let mut ci_errors = test_row(LocalState::default());
+        ci_errors.remote.ci = Observation::failure("boom");
+        assert_eq!(health_glyph(&ci_errors), "!");
+    }
+
+    #[test]
+    fn health_glyph_shows_incoming_arrow_only_when_behind_is_positive() {
+        let clean_row = test_row(LocalState::default());
+        assert_eq!(health_glyph(&clean_row), "●");
+
+        let behind_row = test_row(LocalState {
+            behind: 1,
+            ..LocalState::default()
+        });
+        assert_eq!(health_glyph(&behind_row), "↓");
+    }
+
+    #[test]
+    fn triage_computes_exact_counts_and_the_action_message() {
+        let mut app = App::new(Vec::new());
+
+        // Dirty and behind.
+        let mut dirty_row = test_row(LocalState {
+            modified: 1,
+            upstream: "origin/main".into(),
+            behind: 2,
+            ..LocalState::default()
+        });
+        dirty_row.repo.id = "r1".into();
+        app.rows.push(dirty_row);
+
+        // Confirmed CI failure.
+        let mut failed_row = test_row(LocalState::default());
+        failed_row.repo.id = "r2".into();
+        failed_row.remote.ci = Observation::success(vec![crate::model::Item {
+            detail: "completed failure | abc".into(),
+            ..Default::default()
+        }]);
+        app.rows.push(failed_row);
+
+        // One open PR, one pending release proposal.
+        let mut release_row = test_row(LocalState::default());
+        release_row.repo.id = "r3".into();
+        release_row.remote.prs = Observation::success(vec![crate::model::Item::default()]);
+        release_row.remote.proposals = Observation::success(vec![crate::model::Item::default()]);
+        app.rows.push(release_row);
+
+        let (dirty, behind, failures, prs, releases, actionable, action) = triage(&app);
+        assert_eq!(dirty, 1);
+        assert_eq!(behind, 1);
+        assert_eq!(failures, 1);
+        assert_eq!(prs, 1);
+        assert_eq!(releases, 1);
+        assert_eq!(actionable, 5);
+        assert_eq!(action, "inspect 1 failing checks");
     }
 
     #[test]

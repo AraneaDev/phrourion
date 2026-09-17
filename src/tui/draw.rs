@@ -173,7 +173,7 @@ pub(super) fn action_message(
     "all clear".into()
 }
 
-fn triage(app: &App) -> (usize, usize, usize, usize, usize, usize, String) {
+pub(super) fn triage(app: &App) -> (usize, usize, usize, usize, usize, usize, String) {
     let mut dirty = 0;
     let mut behind = 0;
     let mut failures = 0;
