@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/AraneaDev/phrourion/compare/v0.3.0...v0.3.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* distinguish a disabled Forgejo repo feature from a fetch error ([#16](https://github.com/AraneaDev/phrourion/issues/16)) ([3620f42](https://github.com/AraneaDev/phrourion/commit/3620f42a7c73e4e7e53438ed0e3effccffc621ac))
+
 ## [0.3.0](https://github.com/AraneaDev/phrourion/compare/v0.2.0...v0.3.0) (2026-09-17)
 
 
