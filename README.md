@@ -38,10 +38,12 @@ is open upstream, and whether a release is waiting for attention.
 
 ## Status
 
-> **Status:** pre-release. GitHub monitoring and the safe fast-forward pull path
-> are ready. GitLab, Bitbucket, and Forgejo adapters are planned behind the same
-> provider boundary. Phrourion requires Rust 1.85 or newer and GitHub monitoring
-> requires an authenticated [GitHub CLI](https://cli.github.com/).
+> **Status:** pre-release. GitHub and Forgejo monitoring and the safe fast-forward
+> pull path are ready. GitLab and Bitbucket adapters are planned behind the same
+> provider boundary. Phrourion requires Rust 1.85 or newer; GitHub monitoring
+> requires an authenticated [GitHub CLI](https://cli.github.com/), and Forgejo
+> monitoring requires a personal access token in a `PHROURION_TOKEN_<HOST>`
+> environment variable (optional for public repositories).
 
 ## What it shows
 
@@ -136,6 +138,17 @@ Authenticate the GitHub CLI if remote GitHub data is wanted:
 ```bash
 gh auth login
 ```
+
+For a self-hosted or Codeberg Forgejo instance, monitoring a private repository
+requires a personal access token in an environment variable named after the
+host: uppercase it and replace every non-alphanumeric character with `_`, then
+prefix with `PHROURION_TOKEN_`. For example, `codeberg.org` becomes
+`PHROURION_TOKEN_CODEBERG_ORG`. Public repositories work without a token. Only
+`codeberg.org` is auto-detected as a Forgejo host; any other self-hosted
+Forgejo instance must be registered with `--provider forgejo` explicitly. The
+Forgejo adapter uses `rustls` with the bundled Mozilla root store, so a
+self-hosted instance behind a private/internal CA certificate isn't supported
+yet.
 
 ## Use
 
