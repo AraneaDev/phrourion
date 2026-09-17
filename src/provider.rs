@@ -16,6 +16,7 @@ pub trait RemoteProvider: Send + Sync {
 pub fn adapter(kind: &ProviderKind) -> Box<dyn RemoteProvider> {
     match kind {
         ProviderKind::Github => Box::new(Github),
+        ProviderKind::Forgejo => Box::new(crate::forgejo::Forgejo),
         _ => Box::new(Unsupported),
     }
 }
