@@ -5,10 +5,33 @@ use crate::{
     model::{Item, Observation, RemoteState, Repo},
     provider::{self, RemoteProvider, SnapshotFuture},
 };
-use anyhow::{Context, Result, bail};
-use reqwest::Client;
+use anyhow::{Context, Result};
+use reqwest::{Client, StatusCode};
 use serde_json::Value;
-use std::{sync::OnceLock, time::Duration};
+use std::{fmt, sync::OnceLock, time::Duration};
+
+// Carries the HTTP status alongside the message so callers can distinguish a
+// disabled repo feature (404 on /pulls, /releases, /issues) from a real
+// failure, without parsing the Display string back apart.
+#[derive(Debug)]
+struct HttpError {
+    status: StatusCode,
+    message: String,
+}
+
+impl fmt::Display for HttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.status, self.message)
+    }
+}
+
+impl std::error::Error for HttpError {}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HttpError>()
+        .is_some_and(|e| e.status == StatusCode::NOT_FOUND)
+}
 
 pub fn env_token_var(host: &str) -> String {
     let normalized: String = host
@@ -83,14 +106,20 @@ pub(crate) async fn get(host: &str, path: &str, query: &[(&str, &str)]) -> Resul
                 snippet
             }
         });
-    bail!("{status}: {message}");
+    Err(HttpError { status, message }.into())
 }
 
+// `Ok(None)` means the endpoint 404'd on the first page — Forgejo/Gitea
+// returns that for a repo feature the owner has turned off (e.g.
+// has_pull_requests/has_releases/has_issues: false), not for "no items
+// exist" (that's an empty `Ok(Some(vec![]))`). Only checked on page 1: a
+// 404 after a successful earlier page would be a real, separate failure,
+// not a disabled-feature signal.
 pub(crate) async fn paginated(
     host: &str,
     path: &str,
     query: &[(&str, &str)],
-) -> Result<Vec<Value>> {
+) -> Result<Option<Vec<Value>>> {
     let mut rows = Vec::new();
     let mut page: u32 = 1;
     loop {
@@ -98,7 +127,11 @@ pub(crate) async fn paginated(
         let mut full_query: Vec<(&str, &str)> = query.to_vec();
         full_query.push(("page", &page_str));
         full_query.push(("limit", "50"));
-        let value = get(host, path, &full_query).await?;
+        let value = match get(host, path, &full_query).await {
+            Ok(v) => v,
+            Err(e) if page == 1 && is_not_found(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
         let batch = value.as_array().context("Expected a JSON array")?.clone();
         let count = batch.len();
         rows.extend(batch);
@@ -107,7 +140,7 @@ pub(crate) async fn paginated(
         }
         page += 1;
     }
-    Ok(rows)
+    Ok(Some(rows))
 }
 
 pub struct Forgejo;
@@ -146,7 +179,7 @@ impl RemoteProvider for Forgejo {
             );
 
             state.branches = match branches {
-                Ok(rows) => Observation::success(
+                Ok(Some(rows)) => Observation::success(
                     rows.iter()
                         .map(|v| Item {
                             title: provider::text(v, "name"),
@@ -155,11 +188,12 @@ impl RemoteProvider for Forgejo {
                         })
                         .collect(),
                 ),
+                Ok(None) => Observation::unsupported(),
                 Err(e) => Observation::failure(format!("{e:?}")),
             };
 
             match pulls {
-                Ok(rows) => {
+                Ok(Some(rows)) => {
                     state.prs = Observation::success(rows.iter().map(provider::pr_item).collect());
                     state.proposals = Observation::success(
                         rows.iter()
@@ -175,6 +209,13 @@ impl RemoteProvider for Forgejo {
                             .collect(),
                     );
                 }
+                // Pull requests are a repo feature Forgejo/Gitea lets an owner
+                // turn off (has_pull_requests: false) — the API 404s the
+                // endpoint entirely rather than returning an empty list.
+                Ok(None) => {
+                    state.prs = Observation::unsupported();
+                    state.proposals = Observation::unsupported();
+                }
                 Err(e) => {
                     let message = format!("{e:?}");
                     state.prs = Observation::failure(message.clone());
@@ -183,17 +224,19 @@ impl RemoteProvider for Forgejo {
             }
 
             state.issues = match issues {
-                Ok(rows) => Observation::success(
+                Ok(Some(rows)) => Observation::success(
                     rows.iter()
                         .filter(|v| provider::matches_issue_labels(v, &repo.issue_labels))
                         .map(provider::issue_item)
                         .collect(),
                 ),
+                // Issues are also a togglable repo feature (has_issues: false).
+                Ok(None) => Observation::unsupported(),
                 Err(e) => Observation::failure(format!("{e:?}")),
             };
 
             match releases {
-                Ok(rows) => {
+                Ok(Some(rows)) => {
                     state.drafts = Observation::success(
                         rows.iter()
                             .filter(|v| v["draft"] == true)
@@ -206,6 +249,11 @@ impl RemoteProvider for Forgejo {
                             .map(provider::release_item)
                             .collect(),
                     );
+                }
+                // Releases are also togglable (has_releases: false).
+                Ok(None) => {
+                    state.drafts = Observation::unsupported();
+                    state.published = Observation::unsupported();
                 }
                 Err(e) => {
                     let message = format!("{e:?}");
@@ -259,6 +307,26 @@ impl RemoteProvider for Forgejo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_found_is_detected_only_for_a_404_http_error() {
+        let not_found: anyhow::Error = HttpError {
+            status: StatusCode::NOT_FOUND,
+            message: "The target couldn't be found.".into(),
+        }
+        .into();
+        assert!(is_not_found(&not_found));
+
+        let server_error: anyhow::Error = HttpError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "boom".into(),
+        }
+        .into();
+        assert!(!is_not_found(&server_error));
+
+        let other: anyhow::Error = anyhow::anyhow!("Forgejo request failed");
+        assert!(!is_not_found(&other));
+    }
 
     #[test]
     fn env_token_var_uppercases_the_host_and_replaces_non_alphanumerics() {
