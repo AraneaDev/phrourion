@@ -10,7 +10,7 @@ use crate::{
     provider, registry,
 };
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use std::{
     collections::HashMap,
@@ -88,6 +88,31 @@ fn notify_on_attention_entry(
     }
 }
 
+pub(super) fn is_press(key: &KeyEvent) -> bool {
+    key.kind == KeyEventKind::Press
+}
+
+pub(super) fn is_quit_hotkey(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+// A remote fetch is "failed" for backoff purposes if any of the three
+// always-attempted calls errored — a disabled feature (Observation
+// {supported: false}) is not a failure, only an actual error is.
+pub(super) fn remote_failed(state: &RemoteState) -> bool {
+    state.default_branch.error.is_some() || state.prs.error.is_some() || state.ci.error.is_some()
+}
+
+// Consecutive-failure count, capped at 4 so the backoff below tops out at
+// 16 minutes rather than growing unbounded.
+pub(super) fn next_failure_count(current: u32, failed: bool) -> u32 {
+    if failed { (current + 1).min(4) } else { 0 }
+}
+
+pub(super) fn remote_backoff(failures: u32) -> Duration {
+    Duration::from_secs(60 * 2_u64.pow(failures))
+}
+
 pub(super) async fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
@@ -154,12 +179,8 @@ pub(super) async fn event_loop(
                         .map(RowState::attention);
                     app.update_rows(|rows| {
                         if let Some(row) = rows.iter_mut().find(|r| r.repo.id == id) {
-                            let failed = state.default_branch.error.is_some()
-                                || state.prs.error.is_some()
-                                || state.ci.error.is_some();
-                            row.failures = if failed { (row.failures + 1).min(4) } else { 0 };
-                            row.next_remote =
-                                Instant::now() + Duration::from_secs(60 * 2_u64.pow(row.failures));
+                            row.failures = next_failure_count(row.failures, remote_failed(&state));
+                            row.next_remote = Instant::now() + remote_backoff(row.failures);
                             row.remote = state.retain_previous(&row.remote);
                             row.remote_busy = false;
                             save_cache(&row.repo, &row.remote);
@@ -230,12 +251,10 @@ pub(super) async fn event_loop(
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
         {
-            if key.kind != KeyEventKind::Press {
+            if !is_press(&key) {
                 continue;
             }
-            if key.code == KeyCode::Char('c')
-                && key.modifiers.contains(event::KeyModifiers::CONTROL)
-            {
+            if is_quit_hotkey(&key) {
                 exit_screen(terminal).await?;
                 break;
             }

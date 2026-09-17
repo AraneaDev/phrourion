@@ -38,15 +38,18 @@ mod tests {
             ci_color, ci_label, count, count_color, count_color_combined, health_glyph, items,
             meter, spinner_frame, state_color, status_color, triage, worse_state,
         },
-        event_loop::{entered_notice_tier, notify_script},
+        event_loop::{
+            entered_notice_tier, is_press, is_quit_hotkey, next_failure_count, notify_script,
+            remote_backoff, remote_failed,
+        },
     };
     use crate::{
         git::LocalState,
         model::{Observation, RemoteState, Repo},
     };
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::style::Color;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn notify_script_escapes_quotes_and_backslashes_in_repo_supplied_text() {
@@ -1207,5 +1210,71 @@ mod tests {
         let mut calm_app = App::new(Vec::new());
         calm_app.rows.push(test_row(LocalState::default()));
         assert_eq!(color_at_action(&calm_app), Color::Green);
+    }
+
+    #[test]
+    fn is_press_matches_only_the_press_event_kind() {
+        assert!(is_press(&KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE
+        )));
+        let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        release.kind = KeyEventKind::Release;
+        assert!(!is_press(&release));
+    }
+
+    #[test]
+    fn is_quit_hotkey_requires_both_ctrl_and_c() {
+        assert!(is_quit_hotkey(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_quit_hotkey(&KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_quit_hotkey(&KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
+    fn remote_failed_is_true_only_when_one_of_the_three_calls_errored() {
+        assert!(!remote_failed(&RemoteState::default()));
+
+        let branch_errored = RemoteState {
+            default_branch: Observation::failure("boom"),
+            ..RemoteState::default()
+        };
+        assert!(remote_failed(&branch_errored));
+
+        let prs_errored = RemoteState {
+            prs: Observation::failure("boom"),
+            ..RemoteState::default()
+        };
+        assert!(remote_failed(&prs_errored));
+
+        let ci_errored = RemoteState {
+            ci: Observation::failure("boom"),
+            ..RemoteState::default()
+        };
+        assert!(remote_failed(&ci_errored));
+    }
+
+    #[test]
+    fn next_failure_count_increments_and_caps_at_four_then_resets_on_success() {
+        assert_eq!(next_failure_count(0, true), 1);
+        assert_eq!(next_failure_count(1, true), 2);
+        assert_eq!(next_failure_count(3, true), 4);
+        assert_eq!(next_failure_count(4, true), 4, "capped at 4");
+        assert_eq!(next_failure_count(4, false), 0, "a success resets to 0");
+    }
+
+    #[test]
+    fn remote_backoff_doubles_from_a_one_minute_base() {
+        assert_eq!(remote_backoff(0), Duration::from_secs(60));
+        assert_eq!(remote_backoff(1), Duration::from_secs(120));
+        assert_eq!(remote_backoff(4), Duration::from_secs(60 * 16));
     }
 }
