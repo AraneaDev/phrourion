@@ -219,7 +219,7 @@ pub(super) fn health_glyph(row: &RowState) -> &'static str {
     }
 }
 
-fn animation_frame() -> usize {
+pub(super) fn animation_frame() -> usize {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -227,7 +227,7 @@ fn animation_frame() -> usize {
         .saturating_div(140) as usize
 }
 
-fn status_color(row: &RowState) -> Color {
+pub(super) fn status_color(row: &RowState) -> Color {
     match health_glyph(row) {
         "!" => Color::Red,
         "◆" | "↓" => Color::Yellow,
@@ -236,7 +236,17 @@ fn status_color(row: &RowState) -> Color {
     }
 }
 
-fn ci_label(state: &RemoteState) -> String {
+pub(super) fn ci_color(label: &str) -> Color {
+    match label {
+        "fail" => Color::Red,
+        "running" => Color::Yellow,
+        "pass" => Color::Green,
+        "!" => Color::Red,
+        _ => Color::DarkGray, // "n/a", "…", "absent", "other"
+    }
+}
+
+pub(super) fn ci_label(state: &RemoteState) -> String {
     let observation = &state.ci;
     let v = match cell_state(observation) {
         CellState::Unsupported => return "n/a".into(),
@@ -272,7 +282,7 @@ fn ci_label(state: &RemoteState) -> String {
     "other".into()
 }
 
-fn items(label: &str, observation: &Observation<Vec<crate::model::Item>>) -> String {
+pub(super) fn items(label: &str, observation: &Observation<Vec<crate::model::Item>>) -> String {
     let mut s = format!("{label} [{}]\n", observation.label());
     if let Some(error) = &observation.error {
         s.push_str(&format!("{}\n", clean(error)));
@@ -432,13 +442,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 local
             };
             let ci = ci_label(&r.remote);
-            let ci_color = match ci.as_str() {
-                "fail" => Color::Red,
-                "running" => Color::Yellow,
-                "pass" => Color::Green,
-                "!" => Color::Red,
-                _ => Color::DarkGray, // "n/a", "…", "absent", "other"
-            };
+            let ci_color = ci_color(&ci);
             let rel_draft_color =
                 count_color_combined(&r.remote.proposals, &r.remote.drafts, Color::Yellow);
             let (attention_priority, attention) = r.attention();

@@ -34,9 +34,9 @@ mod tests {
         app::{AttentionPriority, known_count},
         cache::CACHE_PLACEHOLDER,
         draw::{
-            CellState, action_message, attention_priority_color, cell_state, count, count_color,
-            count_color_combined, health_glyph, meter, spinner_frame, state_color, triage,
-            worse_state,
+            CellState, action_message, animation_frame, attention_priority_color, cell_state,
+            ci_color, ci_label, count, count_color, count_color_combined, health_glyph, items,
+            meter, spinner_frame, state_color, status_color, triage, worse_state,
         },
         event_loop::{entered_notice_tier, notify_script},
     };
@@ -580,11 +580,17 @@ mod tests {
         }]);
         app.rows.push(failed_row);
 
-        // One open PR, one pending release proposal.
+        // One open PR, one pending release proposal, two draft releases
+        // (distinct counts, so releases = proposals + drafts is provably
+        // an addition and not, say, a subtraction).
         let mut release_row = test_row(LocalState::default());
         release_row.repo.id = "r3".into();
         release_row.remote.prs = Observation::success(vec![crate::model::Item::default()]);
         release_row.remote.proposals = Observation::success(vec![crate::model::Item::default()]);
+        release_row.remote.drafts = Observation::success(vec![
+            crate::model::Item::default(),
+            crate::model::Item::default(),
+        ]);
         app.rows.push(release_row);
 
         let (dirty, behind, failures, prs, releases, actionable, action) = triage(&app);
@@ -592,9 +598,179 @@ mod tests {
         assert_eq!(behind, 1);
         assert_eq!(failures, 1);
         assert_eq!(prs, 1);
-        assert_eq!(releases, 1);
-        assert_eq!(actionable, 5);
+        assert_eq!(releases, 3);
+        assert_eq!(actionable, 7);
         assert_eq!(action, "inspect 1 failing checks");
+    }
+
+    #[test]
+    fn health_glyph_shows_spinner_only_when_a_fetch_is_in_flight() {
+        let mut busy_row = test_row(LocalState::default());
+        busy_row.local.data = None;
+        busy_row.local_busy = true;
+        busy_row.remote_busy = false;
+        assert_ne!(health_glyph(&busy_row), "·");
+
+        let mut idle_row = test_row(LocalState::default());
+        idle_row.local.data = None;
+        idle_row.local_busy = false;
+        idle_row.remote_busy = false;
+        assert_eq!(health_glyph(&idle_row), "·");
+    }
+
+    #[test]
+    fn animation_frame_reflects_real_elapsed_time() {
+        // Unix-ms/140 for any real date since ~2001 is far larger than a
+        // stubbed 0 or 1.
+        assert!(animation_frame() > 1_000);
+    }
+
+    #[test]
+    fn status_color_matches_each_health_glyph() {
+        let mut error_row = test_row(LocalState::default());
+        error_row.local = Observation::failure("boom");
+        assert_eq!(status_color(&error_row), Color::Red);
+
+        let dirty_row = test_row(LocalState {
+            staged: 1,
+            ..LocalState::default()
+        });
+        assert_eq!(status_color(&dirty_row), Color::Yellow);
+
+        let behind_row = test_row(LocalState {
+            behind: 1,
+            ..LocalState::default()
+        });
+        assert_eq!(status_color(&behind_row), Color::Yellow);
+
+        let mut loading_row = test_row(LocalState::default());
+        loading_row.local.data = None;
+        loading_row.local_busy = false;
+        loading_row.remote_busy = false;
+        assert_eq!(status_color(&loading_row), Color::DarkGray);
+
+        let clean_row = test_row(LocalState::default());
+        assert_eq!(status_color(&clean_row), Color::Green);
+    }
+
+    #[test]
+    fn ci_label_maps_ci_observation_states_to_labels() {
+        let item = |detail: &str| crate::model::Item {
+            detail: detail.into(),
+            ..Default::default()
+        };
+
+        let unsupported = RemoteState {
+            ci: Observation::unsupported(),
+            ..RemoteState::default()
+        };
+        assert_eq!(ci_label(&unsupported), "n/a");
+
+        assert_eq!(ci_label(&RemoteState::default()), "…");
+
+        let errored = RemoteState {
+            ci: Observation::failure("boom"),
+            ..RemoteState::default()
+        };
+        assert_eq!(ci_label(&errored), "!");
+
+        let empty = RemoteState {
+            ci: Observation::success(vec![]),
+            ..RemoteState::default()
+        };
+        assert_eq!(ci_label(&empty), "absent");
+
+        let failing = RemoteState {
+            ci: Observation::success(vec![item("completed failure")]),
+            ..RemoteState::default()
+        };
+        assert_eq!(ci_label(&failing), "fail");
+
+        let running = RemoteState {
+            ci: Observation::success(vec![item("in_progress")]),
+            ..RemoteState::default()
+        };
+        assert_eq!(ci_label(&running), "running");
+
+        let passing = RemoteState {
+            ci: Observation::success(vec![item("completed success")]),
+            ..RemoteState::default()
+        };
+        assert_eq!(ci_label(&passing), "pass");
+
+        let other = RemoteState {
+            ci: Observation::success(vec![item("some unrecognized status")]),
+            ..RemoteState::default()
+        };
+        assert_eq!(ci_label(&other), "other");
+    }
+
+    #[test]
+    fn ci_color_maps_each_label_to_its_own_color() {
+        assert_eq!(ci_color("fail"), Color::Red);
+        assert_eq!(ci_color("running"), Color::Yellow);
+        assert_eq!(ci_color("pass"), Color::Green);
+        assert_eq!(ci_color("!"), Color::Red);
+        assert_eq!(ci_color("n/a"), Color::DarkGray);
+        assert_eq!(ci_color("other"), Color::DarkGray);
+    }
+
+    #[test]
+    fn items_formats_label_error_and_each_item() {
+        let with_error = Observation::<Vec<crate::model::Item>>::failure("boom");
+        let s = items("Widgets", &with_error);
+        assert!(s.contains("Widgets"));
+        assert!(s.contains("boom"));
+
+        let empty = Observation::success(Vec::<crate::model::Item>::new());
+        assert!(items("Widgets", &empty).contains("None observed"));
+
+        let with_item = Observation::success(vec![crate::model::Item {
+            title: "T1".into(),
+            detail: "D1".into(),
+            url: "U1".into(),
+        }]);
+        let rendered = items("Widgets", &with_item);
+        assert!(rendered.contains("T1"));
+        assert!(rendered.contains("D1"));
+        assert!(rendered.contains("U1"));
+    }
+
+    #[test]
+    fn sync_placeholder_shows_error_glyph_only_when_local_state_itself_errored() {
+        let mut error_row = test_row(LocalState::default());
+        error_row.local = Observation::failure("boom");
+        error_row.repo.name = "err-repo".into();
+        error_row.repo.id = "err-repo".into();
+
+        let mut loading_row = test_row(LocalState::default());
+        loading_row.local = Observation::default();
+        loading_row.repo.name = "load-repo".into();
+        loading_row.repo.id = "load-repo".into();
+
+        let mut app = App::new(Vec::new());
+        app.rows.push(error_row);
+        app.rows.push(loading_row);
+
+        // Narrow layout hides the Local/Branch/PRs/etc columns, so the
+        // Sync column's placeholder is the only "!"/"…" on each row's line.
+        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+
+        let err_line = lines.iter().find(|l| l.contains("err-repo")).unwrap();
+        let load_line = lines.iter().find(|l| l.contains("load-repo")).unwrap();
+        assert!(err_line.contains('!'), "{err_line:?}");
+        assert!(!load_line.contains('!'), "{load_line:?}");
+        assert!(load_line.contains('…'), "{load_line:?}");
     }
 
     #[test]
@@ -812,5 +988,177 @@ mod tests {
                 "row {y} should be {expected:?}"
             );
         }
+    }
+
+    fn render_text(app: &App) -> String {
+        let backend = ratatui::backend::TestBackend::new(140, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn details_panel_switches_content_by_tab() {
+        // If a tab's match arm were deleted, control would fall to the `_`
+        // (log) arm instead, and that tab's marker text — which appears
+        // nowhere in app.log — would be absent.
+        let mut row = test_row(LocalState {
+            head: "abc123head".into(),
+            ..LocalState::default()
+        });
+        row.remote.prs = Observation::success(vec![crate::model::Item {
+            title: "pr-marker".into(),
+            ..Default::default()
+        }]);
+        row.remote.issues = Observation::success(vec![crate::model::Item {
+            title: "issue-marker".into(),
+            ..Default::default()
+        }]);
+        row.remote.proposals = Observation::success(vec![crate::model::Item {
+            title: "proposal-marker".into(),
+            ..Default::default()
+        }]);
+
+        let mut app = App::new(Vec::new());
+        app.rows.push(row);
+
+        app.tab = 0;
+        assert!(render_text(&app).contains("HEAD: abc123head"));
+
+        app.tab = 1;
+        assert!(render_text(&app).contains("Local and cached remote-tracking branches"));
+
+        app.tab = 2;
+        assert!(render_text(&app).contains("pr-marker"));
+
+        app.tab = 3;
+        assert!(render_text(&app).contains("issue-marker"));
+
+        app.tab = 4;
+        assert!(render_text(&app).contains("proposal-marker"));
+    }
+
+    #[test]
+    fn default_branch_placeholder_shows_error_glyph_only_when_it_itself_errored() {
+        let mut error_row = test_row(LocalState::default());
+        error_row.remote.default_branch = Observation::failure("boom");
+        let mut app = App::new(Vec::new());
+        app.rows.push(error_row);
+        app.tab = 0;
+        assert!(render_text(&app).contains("Default branch: !"));
+
+        let mut loading_row = test_row(LocalState::default());
+        loading_row.remote.default_branch = Observation::default();
+        let mut app = App::new(Vec::new());
+        app.rows.push(loading_row);
+        app.tab = 0;
+        assert!(render_text(&app).contains("Default branch: …"));
+    }
+
+    #[test]
+    fn narrow_layout_breakpoint_is_at_exactly_110_columns() {
+        let mut app = App::new(Vec::new());
+        app.rows.push(test_row(LocalState::default()));
+
+        let render_at = |width: u16| -> String {
+            let backend = ratatui::backend::TestBackend::new(width, 30);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+
+        assert!(
+            !render_at(109).contains("Review"),
+            "109 columns should be narrow"
+        );
+        assert!(
+            render_at(110).contains("Review"),
+            "110 columns should be wide"
+        );
+    }
+
+    #[test]
+    fn hint_shows_the_busy_message_only_when_an_action_is_running() {
+        let mut app = App::new(Vec::new());
+        app.rows.push(test_row(LocalState::default()));
+
+        assert!(
+            render_text(&app).contains("? help"),
+            "idle hint should show the full key list"
+        );
+
+        app.action_busy = true;
+        let busy_text = render_text(&app);
+        assert!(
+            busy_text.contains("action running"),
+            "busy hint should show while an action runs"
+        );
+        assert!(!busy_text.contains("? help"));
+    }
+
+    #[test]
+    fn footer_second_line_shows_the_last_log_entry_only_when_it_is_non_empty() {
+        let mut app = App::new(Vec::new());
+        app.rows.push(test_row(LocalState::default()));
+        app.log.push("footer-marker-text".into());
+        assert!(render_text(&app).contains("footer-marker-text"));
+
+        app.log.push(String::new());
+        assert!(
+            !render_text(&app).contains("footer-marker-text"),
+            "an empty last entry must not resurrect the prior marker"
+        );
+    }
+
+    #[test]
+    fn action_status_color_reflects_failures_then_actionable_then_calm() {
+        let color_at_action = |app: &App| -> Color {
+            let backend = ratatui::backend::TestBackend::new(140, 30);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            for y in 0..buffer.area.height {
+                let line: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                if let Some(byte_pos) = line.find("ACTION:") {
+                    let char_pos = line[..byte_pos].chars().count() as u16;
+                    return buffer[(char_pos, y)].fg;
+                }
+            }
+            panic!("ACTION: not found in rendered output: nothing to sample");
+        };
+
+        let mut failing_app = App::new(Vec::new());
+        let mut failing_row = test_row(LocalState::default());
+        failing_row.remote.ci = Observation::success(vec![crate::model::Item {
+            detail: "completed failure".into(),
+            ..Default::default()
+        }]);
+        failing_app.rows.push(failing_row);
+        assert_eq!(color_at_action(&failing_app), Color::Red);
+
+        let mut actionable_app = App::new(Vec::new());
+        actionable_app.rows.push(test_row(LocalState {
+            modified: 1,
+            ..LocalState::default()
+        }));
+        assert_eq!(color_at_action(&actionable_app), Color::Yellow);
+
+        let mut calm_app = App::new(Vec::new());
+        calm_app.rows.push(test_row(LocalState::default()));
+        assert_eq!(color_at_action(&calm_app), Color::Green);
     }
 }
