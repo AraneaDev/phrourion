@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/AraneaDev/phrourion/compare/v0.3.1...v0.3.2) (2026-09-17)
+
+
+### Bug Fixes
+
+* stop showing unknown/errored for data that's actually known ([#18](https://github.com/AraneaDev/phrourion/issues/18)) ([5eeaa63](https://github.com/AraneaDev/phrourion/commit/5eeaa63d701b2be924f9c69a0054f174eaf42e29))
+
 ## [0.3.1](https://github.com/AraneaDev/phrourion/compare/v0.3.0...v0.3.1) (2026-09-17)
 
 
