@@ -42,7 +42,13 @@ Issues support sees real use), and any comment/close/merge action from the TUI
 - **Desktop notification on attention transitions** — notify when a repo
   newly enters a Problem/Pending state (conflict, failed CI, diverged,
   pending release) since the last refresh, while `phro` is running. Not a
-  background daemon; no notification if `phro` isn't open. *Not started.*
+  background daemon; no notification if `phro` isn't open. *Shipped*
+  (`notify-send` on Linux, `osascript` on macOS, best-effort — silently
+  no-ops if neither is installed; fires only when a repo's attention tier
+  moves from calm into Problem/Pending, not on every refresh while already
+  in that tier; a repo that already has an issue when `phro` first starts
+  will notify once on that first observation, since there's no prior state
+  to compare against).
 - **Per-repo label filters** — an `issue_labels` field in `repos.toml`
   mirroring the existing `release_labels` pattern, to narrow the Issues list
   per repository. *Shipped* (client-side OR match on label name; empty list

@@ -496,6 +496,61 @@ fn health_glyph(row: &RowState) -> &'static str {
     }
 }
 
+// A repo moving into Problem or Pending from a calmer tier is worth a notification;
+// staying within the tier (e.g. one unpushed commit becoming two) is not.
+fn entered_notice_tier(before: AttentionPriority, after: AttentionPriority) -> bool {
+    after <= AttentionPriority::Pending && before > AttentionPriority::Pending
+}
+
+fn applescript_string_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn notify_script(title: &str, body: &str) -> String {
+    format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_string_literal(body),
+        applescript_string_literal(title)
+    )
+}
+
+async fn notify(repo_name: &str, reason: &str, cwd: &Path) {
+    let title = clean(repo_name);
+    let body = clean(reason);
+    let (program, args) = if cfg!(target_os = "macos") {
+        (
+            "osascript".to_string(),
+            vec!["-e".to_string(), notify_script(&title, &body)],
+        )
+    } else {
+        ("notify-send".to_string(), vec![title, body])
+    };
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let _ = crate::command::run(&program, &args, cwd).await;
+}
+
+fn notify_on_attention_entry(
+    app: &App,
+    tasks: &mut JoinSet<()>,
+    id: &str,
+    before: Option<(AttentionPriority, String)>,
+) {
+    let Some((before_priority, _)) = before else {
+        return;
+    };
+    let Some(row) = app.rows.iter().find(|r| r.repo.id == id) else {
+        return;
+    };
+    let (after_priority, reason) = row.attention();
+    if entered_notice_tier(before_priority, after_priority) {
+        let name = row.repo.name.clone();
+        let path = row.repo.path.clone();
+        tasks.spawn(async move {
+            notify(&name, &reason, &path).await;
+        });
+    }
+}
+
 fn animation_frame() -> usize {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1049,14 +1104,25 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
         while let Ok(message) = rx.try_recv() {
             match message {
                 Message::Local(id, state) => {
+                    let before = app
+                        .rows
+                        .iter()
+                        .find(|r| r.repo.id == id)
+                        .map(RowState::attention);
                     app.update_rows(|rows| {
                         if let Some(row) = rows.iter_mut().find(|r| r.repo.id == id) {
                             row.local = (*state).retain_previous(&row.local);
                             row.local_busy = false;
                         }
                     });
+                    notify_on_attention_entry(app, &mut tasks, &id, before);
                 }
                 Message::Remote(id, state) => {
+                    let before = app
+                        .rows
+                        .iter()
+                        .find(|r| r.repo.id == id)
+                        .map(RowState::attention);
                     app.update_rows(|rows| {
                         if let Some(row) = rows.iter_mut().find(|r| r.repo.id == id) {
                             let failed = state.default_branch.error.is_some()
@@ -1070,6 +1136,7 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
                             save_cache(&row.repo, &row.remote);
                         }
                     });
+                    notify_on_attention_entry(app, &mut tasks, &id, before);
                 }
                 Message::Fetched(id, result) => {
                     if let Some(row) = app.rows.iter_mut().find(|r| r.repo.id == id) {
@@ -1363,6 +1430,27 @@ async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, config: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notify_script_escapes_quotes_and_backslashes_in_repo_supplied_text() {
+        let script = notify_script(r#"weird "repo\name""#, "CI failed");
+        assert_eq!(
+            script,
+            r#"display notification "CI failed" with title "weird \"repo\\name\"""#
+        );
+    }
+
+    #[test]
+    fn notice_fires_only_when_entering_problem_or_pending_from_a_calmer_tier() {
+        use AttentionPriority::*;
+        assert!(entered_notice_tier(Quiet, Problem));
+        assert!(entered_notice_tier(LocalWork, Pending));
+        assert!(entered_notice_tier(Quiet, Pending));
+        assert!(!entered_notice_tier(Problem, Problem));
+        assert!(!entered_notice_tier(Pending, Problem));
+        assert!(!entered_notice_tier(Quiet, LocalWork));
+        assert!(!entered_notice_tier(Quiet, Quiet));
+    }
 
     fn test_row(local: LocalState) -> RowState {
         RowState {

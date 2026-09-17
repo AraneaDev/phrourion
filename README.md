@@ -74,6 +74,10 @@ when XDG is not available. It stores paths and remote identities, not tokens.
 
 ## Actions
 
+When a repository newly enters conflict, failed-CI, diverged, or pending-release
+state while `phro` is running, it raises a desktop notification (`notify-send`
+on Linux, `osascript` on macOS) once for that transition, not on every refresh.
+
 The dashboard is read-only until you choose an action. It can refresh local and
 remote state, open a repository in the browser, add or remove a checkout, pull
 the selected repository after confirmation, and check out a pull request's
