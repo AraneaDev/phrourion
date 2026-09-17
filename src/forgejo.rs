@@ -307,6 +307,309 @@ impl RemoteProvider for Forgejo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    // Rust's test harness runs #[test]/#[tokio::test] fns concurrently on
+    // separate threads by default, but PHROURION_FORGEJO_TEST_URL and any
+    // PHROURION_TOKEN_* var are process-global. Every test below that reads
+    // or writes one of those vars holds this lock for its whole body so no
+    // two such tests interleave (mirrors tests/forgejo_workflow.rs's
+    // LIVE_TEST_LOCK for the same reason). Shared with src/provider.rs's
+    // tests, which also set PHROURION_FORGEJO_TEST_URL.
+    use crate::test_support::FORGEJO_ENV_LOCK as ENV_LOCK;
+
+    struct MockResponse {
+        status: u16,
+        body: String,
+    }
+
+    // Serves one canned response per accepted connection, in order, on a
+    // background thread. Returns the server's base URL and a channel that
+    // yields each request's raw bytes (headers included) as it arrives, so
+    // a test can assert on what was actually sent (e.g. an Authorization
+    // header) without a mocking dependency.
+    fn serve_mock(responses: Vec<MockResponse>) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for resp in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 8192];
+                let mut request = Vec::new();
+                loop {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let _ = tx.send(request);
+                let reason = match resp.status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Error",
+                };
+                let payload = format!(
+                    "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp.status,
+                    resp.body.len(),
+                    resp.body
+                );
+                let _ = stream.write_all(payload.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    // Like serve_mock, but for callers that fire several requests
+    // concurrently (e.g. Forgejo::snapshot()'s tokio::join!): spawns a
+    // fresh thread per accepted connection and routes each one by matching
+    // `pattern` against the request's first line (method + path + query),
+    // so response order doesn't need to match request order. Any path that
+    // matches no route gets `[]` (a harmless empty page/object). Runs for
+    // the rest of the process, so no response count needs to be known
+    // upfront.
+    fn serve_routed_mock(routes: Vec<(&'static str, String)>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let routes = std::sync::Arc::new(routes);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let routes = routes.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 8192];
+                    let mut request = Vec::new();
+                    loop {
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let request_line = String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    let body = routes
+                        .iter()
+                        .find(|(pattern, _)| request_line.contains(pattern))
+                        .map(|(_, body)| body.as_str())
+                        .unwrap_or("[]");
+                    let payload = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(payload.as_bytes());
+                    let _ = stream.flush();
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    // Caller must hold ENV_LOCK for the duration of this call. Awaits `fut`
+    // (not merely constructs it) before restoring the previous value, so the
+    // override is actually in effect while the request runs.
+    async fn with_test_url<T>(url: &str, fut: impl std::future::Future<Output = T>) -> T {
+        let previous = std::env::var("PHROURION_FORGEJO_TEST_URL").ok();
+        unsafe {
+            std::env::set_var("PHROURION_FORGEJO_TEST_URL", url);
+        }
+        let result = fut.await;
+        unsafe {
+            match &previous {
+                Some(v) => std::env::set_var("PHROURION_FORGEJO_TEST_URL", v),
+                None => std::env::remove_var("PHROURION_FORGEJO_TEST_URL"),
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn client_is_cached_across_calls() {
+        assert!(std::ptr::eq(client(), client()));
+    }
+
+    #[test]
+    fn http_error_display_includes_status_and_message() {
+        let err = HttpError {
+            status: StatusCode::NOT_FOUND,
+            message: "nope".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            format!("{}: {}", StatusCode::NOT_FOUND, "nope")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_returns_parsed_json_on_success_via_a_local_mock_server() {
+        let _guard = ENV_LOCK.lock().await;
+        let (base, _rx) = serve_mock(vec![MockResponse {
+            status: 200,
+            body: r#"{"hello":"world"}"#.into(),
+        }]);
+        let value = with_test_url(&base, get("mock", "anything", &[]))
+            .await
+            .expect("mock server returned 200 with valid JSON");
+        assert_eq!(value["hello"], "world");
+    }
+
+    #[tokio::test]
+    async fn paginated_collects_a_single_short_page_via_a_local_mock_server() {
+        let _guard = ENV_LOCK.lock().await;
+        let (base, _rx) = serve_mock(vec![MockResponse {
+            status: 200,
+            body: r#"[{"id":1},{"id":2}]"#.into(),
+        }]);
+        let rows = with_test_url(&base, paginated("mock", "items", &[]))
+            .await
+            .expect("page should parse")
+            .expect("feature is not reported disabled");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], 1);
+        assert_eq!(rows[1]["id"], 2);
+    }
+
+    #[tokio::test]
+    async fn paginated_returns_none_when_the_first_page_404s() {
+        let _guard = ENV_LOCK.lock().await;
+        let (base, _rx) = serve_mock(vec![MockResponse {
+            status: 404,
+            body: r#"{"message":"Not Found"}"#.into(),
+        }]);
+        let result = with_test_url(&base, paginated("mock", "disabled-feature", &[])).await;
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn paginated_propagates_a_404_on_a_later_page_as_a_real_error() {
+        let _guard = ENV_LOCK.lock().await;
+        // A full 50-item first page forces a second request; the 404 there
+        // must NOT be read as "feature disabled" (that's only true on page
+        // 1) — it's a genuine failure partway through pagination.
+        let full_page: String = format!(
+            "[{}]",
+            (0..50)
+                .map(|i| format!(r#"{{"id":{i}}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (base, _rx) = serve_mock(vec![
+            MockResponse {
+                status: 200,
+                body: full_page,
+            },
+            MockResponse {
+                status: 404,
+                body: r#"{"message":"Not Found"}"#.into(),
+            },
+        ]);
+        let result = with_test_url(&base, paginated("mock", "items", &[])).await;
+        assert!(
+            result.is_err(),
+            "a 404 past page 1 should propagate as Err, not Ok(None)"
+        );
+    }
+
+    #[tokio::test]
+    async fn paginated_continues_past_a_full_page_and_advances_the_page_number() {
+        let _guard = ENV_LOCK.lock().await;
+        let full_page: String = format!(
+            "[{}]",
+            (0..50)
+                .map(|i| format!(r#"{{"id":{i}}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (base, rx) = serve_mock(vec![
+            MockResponse {
+                status: 200,
+                body: full_page,
+            },
+            MockResponse {
+                status: 200,
+                body: r#"[{"id":9001},{"id":9002},{"id":9003}]"#.into(),
+            },
+        ]);
+        let rows = with_test_url(&base, paginated("mock", "items", &[]))
+            .await
+            .expect("both pages should parse")
+            .expect("feature is not reported disabled");
+
+        // Exactly 50 on page 1 must NOT be treated as the short/last page
+        // (`< 50`, not `<= 50`) — it has to fetch page 2 and append it.
+        assert_eq!(
+            rows.len(),
+            53,
+            "a full 50-item page must fetch another page, not stop at exactly 50"
+        );
+        assert_eq!(rows[50]["id"], 9001);
+
+        let _first_request = rx.recv().unwrap();
+        let second_request = String::from_utf8_lossy(&rx.recv().unwrap()).to_lowercase();
+        assert!(
+            second_request.contains("page=2"),
+            "expected the second request to ask for page 2: {second_request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_sends_the_bearer_token_only_when_it_is_non_empty() {
+        let _guard = ENV_LOCK.lock().await;
+        let host = "mock";
+        let var = env_token_var(host);
+        let previous_token = std::env::var(&var).ok();
+        let (base, rx) = serve_mock(vec![
+            MockResponse {
+                status: 200,
+                body: "{}".into(),
+            },
+            MockResponse {
+                status: 200,
+                body: "{}".into(),
+            },
+        ]);
+
+        unsafe {
+            std::env::set_var(&var, "s3cr3t");
+        }
+        with_test_url(&base, get(host, "with-token", &[]))
+            .await
+            .unwrap();
+        let with_token = String::from_utf8_lossy(&rx.recv().unwrap()).to_lowercase();
+
+        unsafe {
+            std::env::set_var(&var, "");
+        }
+        with_test_url(&base, get(host, "without-token", &[]))
+            .await
+            .unwrap();
+        let without_token = String::from_utf8_lossy(&rx.recv().unwrap()).to_lowercase();
+
+        unsafe {
+            match &previous_token {
+                Some(v) => std::env::set_var(&var, v),
+                None => std::env::remove_var(&var),
+            }
+        }
+
+        assert!(with_token.contains("authorization: token s3cr3t"));
+        assert!(!without_token.contains("authorization"));
+    }
 
     #[test]
     fn not_found_is_detected_only_for_a_404_http_error() {
@@ -340,14 +643,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn base_url_defaults_to_https_and_honors_the_test_override() {
-        // SAFETY: no other test in this binary reads PHROURION_FORGEJO_TEST_URL,
-        // so concurrent execution with other tests doesn't race on this var.
-        // Rust's test harness still runs #[test] fns on separate threads by
-        // default, so save and restore any prior value rather than assuming
-        // none exists, for consistency with tests/forgejo_workflow.rs's
-        // equivalent handling of PHROURION_TOKEN_LOCALHOST.
+    #[tokio::test]
+    async fn base_url_defaults_to_https_and_honors_the_test_override() {
+        // Rust's test harness still runs #[test]/#[tokio::test] fns on
+        // separate threads by default, and every other test in this module
+        // that touches PHROURION_FORGEJO_TEST_URL holds ENV_LOCK for its
+        // whole body — so this one must too, or the two race.
+        let _guard = ENV_LOCK.lock().await;
         let previous = std::env::var("PHROURION_FORGEJO_TEST_URL").ok();
         unsafe {
             std::env::remove_var("PHROURION_FORGEJO_TEST_URL");
@@ -363,5 +665,38 @@ mod tests {
                 None => std::env::remove_var("PHROURION_FORGEJO_TEST_URL"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn forgejo_snapshot_splits_releases_into_drafts_and_published() {
+        let _guard = ENV_LOCK.lock().await;
+        let base = serve_routed_mock(vec![(
+            "/releases",
+            r#"[{"tag_name":"v1-draft","draft":true,"html_url":"u1","published_at":""},{"tag_name":"v2-published","draft":false,"html_url":"u2","published_at":"2024-01-01"}]"#.into(),
+        )]);
+        let repo = crate::model::Repo {
+            id: "t".into(),
+            name: "t".into(),
+            path: std::env::temp_dir(),
+            remote: "origin".into(),
+            identity: crate::model::Remote {
+                kind: crate::model::ProviderKind::Forgejo,
+                host: "mock".into(),
+                project: "org/repo".into(),
+            },
+            enabled: true,
+            release_workflows: vec![],
+            release_labels: vec![],
+            issue_labels: vec![],
+        };
+        let state = with_test_url(&base, Forgejo.snapshot(&repo)).await;
+
+        let drafts = state.drafts.data.expect("drafts should be populated");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].title, "v1-draft");
+
+        let published = state.published.data.expect("published should be populated");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].title, "v2-published");
     }
 }

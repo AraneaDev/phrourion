@@ -155,3 +155,82 @@ pub fn clean(text: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_enabled_defaults_to_true() {
+        assert!(enabled());
+    }
+
+    #[test]
+    fn label_distinguishes_unsupported_stale_error_fresh_and_loading() {
+        let unsupported: Observation<()> = Observation::unsupported();
+        assert_eq!(unsupported.label(), "unsupported");
+
+        // Backfilled by retain_previous: a real prior fetch (observed set)
+        // whose current attempt errored (error set too).
+        let stale = Observation::<()> {
+            data: None,
+            observed: Some(now()),
+            error: Some("boom".into()),
+            supported: true,
+        };
+        assert!(stale.label().starts_with("stale "));
+        assert!(stale.label().ends_with('s'));
+
+        // Never had a successful fetch, only ever errored.
+        let error_only = Observation::<()> {
+            data: None,
+            observed: None,
+            error: Some("boom".into()),
+            supported: true,
+        };
+        assert_eq!(error_only.label(), "error");
+
+        let fresh: Observation<()> = Observation::success(());
+        assert!(fresh.label().ends_with("s ago"));
+
+        let loading: Observation<()> = Observation::default();
+        assert_eq!(loading.label(), "loading");
+    }
+
+    #[test]
+    fn retain_previous_backfills_only_when_errored_with_no_data_of_its_own() {
+        let previous = Observation::success(vec!["old".to_string()]);
+
+        // Errored AND no data of its own: backfill from the previous value.
+        let errored_no_data = Observation::<Vec<String>>::failure("boom");
+        let backfilled = errored_no_data.retain_previous(&previous);
+        assert_eq!(backfilled.data.as_deref(), Some(&["old".to_string()][..]));
+        assert_eq!(backfilled.error.as_deref(), Some("boom"));
+
+        // Errored but already has its own data: must not be overwritten.
+        let mut errored_with_data = Observation::<Vec<String>>::failure("boom");
+        errored_with_data.data = Some(vec!["own".to_string()]);
+        let kept = errored_with_data.retain_previous(&previous);
+        assert_eq!(kept.data.as_deref(), Some(&["own".to_string()][..]));
+
+        // No error at all: must not touch data, regardless of `previous`.
+        let clean: Observation<Vec<String>> = Observation::default();
+        let untouched = clean.retain_previous(&previous);
+        assert!(untouched.data.is_none());
+    }
+
+    #[test]
+    fn now_returns_a_real_unix_timestamp() {
+        // Any date after 2001 is > 1e9 seconds since the epoch, so this
+        // distinguishes the real clock from a stubbed 0 or 1.
+        assert!(now() > 1_000_000_000);
+    }
+
+    #[test]
+    fn clean_strips_control_characters_and_bidi_overrides_but_keeps_normal_text() {
+        assert_eq!(clean("hello world"), "hello world");
+        assert_eq!(clean("bad\u{7}bell"), "badbell");
+        assert_eq!(clean("evil\u{202e}gnp.exe"), "evilgnp.exe");
+        assert_eq!(clean("emoji-safe-🎉"), "emoji-safe-🎉");
+    }
+}

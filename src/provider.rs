@@ -46,6 +46,19 @@ pub struct Github;
 const RATE_LIMIT_ATTEMPTS: u32 = 3;
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
 
+// Test seam, same pattern as PHROURION_GH/PHROURION_FORGEJO_TEST_URL: lets
+// tests exercise the real retry loop (attempt count, backoff doubling)
+// without paying RATE_LIMIT_BACKOFF's real delay on every attempt — which
+// otherwise taxes every mutation-testing run of the whole suite, not just
+// this crate's own `cargo test`.
+fn initial_backoff() -> Duration {
+    std::env::var("PHROURION_RATE_LIMIT_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(RATE_LIMIT_BACKOFF)
+}
+
 // gh reports both primary and secondary rate limits as plain text on stderr, no
 // structured status; matching a substring is the only signal command::run exposes.
 fn is_rate_limited(error: &str) -> bool {
@@ -66,7 +79,7 @@ async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
     if pages {
         args.extend(["--paginate", "--slurp"]);
     }
-    let mut backoff = RATE_LIMIT_BACKOFF;
+    let mut backoff = initial_backoff();
     let mut attempts_left = RATE_LIMIT_ATTEMPTS;
     loop {
         attempts_left -= 1;
@@ -412,6 +425,79 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // Rust's test harness runs different #[test]/#[tokio::test] fns
+    // concurrently on separate threads by default, but PHROURION_GH is
+    // process-global. Every test below that sets it holds this lock for
+    // its whole body so no two such tests interleave.
+    static GH_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn test_repo() -> Repo {
+        Repo {
+            id: "t".into(),
+            name: "t".into(),
+            path: std::env::temp_dir(),
+            remote: "origin".into(),
+            identity: crate::model::Remote {
+                kind: ProviderKind::Github,
+                host: "example.com".into(),
+                project: "org/repo".into(),
+            },
+            enabled: true,
+            release_workflows: vec![],
+            release_labels: vec![],
+            issue_labels: vec![],
+        }
+    }
+
+    fn write_executable(dir: &std::path::Path, name: &str, contents: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        path
+    }
+
+    // A fake `gh` for testing api()/Github::snapshot() without a real
+    // network call or a `gh` installation. api()'s args are always
+    // `api --hostname HOST --method GET ENDPOINT [--paginate --slurp]`,
+    // so the endpoint is always positional arg $6. `overrides` maps an
+    // endpoint substring to the raw JSON gh would print for it; anything
+    // else gets an empty page (`[[]]` for --paginate --slurp calls, `{}`
+    // otherwise) so the rest of snapshot()'s concurrent calls succeed
+    // harmlessly instead of hanging or failing the whole snapshot.
+    fn fake_gh(dir: &std::path::Path, overrides: &[(&str, &str)]) -> std::path::PathBuf {
+        let mut script = String::from("#!/bin/sh\nendpoint=\"$6\"\ncase \"$endpoint\" in\n");
+        for (pattern, body) in overrides {
+            script.push_str(&format!("  *{pattern}*) printf '%s' '{body}' ;;\n"));
+        }
+        script.push_str(
+            "  *) if [ \"$7\" = \"--paginate\" ]; then printf '%s' '[[]]'; else printf '%s' '{}'; fi ;;\n",
+        );
+        script.push_str("esac\n");
+        write_executable(dir, "fake-gh", &script)
+    }
+
+    // Caller must hold GH_ENV_LOCK for the duration of this call.
+    async fn with_fake_gh<T>(gh: &std::path::Path, fut: impl std::future::Future<Output = T>) -> T {
+        let previous = std::env::var("PHROURION_GH").ok();
+        unsafe {
+            std::env::set_var("PHROURION_GH", gh);
+        }
+        let result = fut.await;
+        unsafe {
+            match &previous {
+                Some(v) => std::env::set_var("PHROURION_GH", v),
+                None => std::env::remove_var("PHROURION_GH"),
+            }
+        }
+        result
+    }
+
     #[test]
     fn pagination_requires_every_page_to_have_expected_shape() {
         assert_eq!(flatten_pages(json!([[1], [2, 3]]), None).unwrap().len(), 3);
@@ -492,5 +578,312 @@ mod tests {
             release_evidence(&json!({"title":"chore(main): release 1.2.3"}), &[]).as_deref(),
             Some("candidate: title only")
         );
+    }
+
+    #[test]
+    fn release_evidence_detects_the_autorelease_pending_label() {
+        assert_eq!(
+            release_evidence(&json!({"labels":[{"name":"autorelease: pending"}]}), &[]).as_deref(),
+            Some("release label")
+        );
+    }
+
+    #[test]
+    fn release_evidence_detects_a_caller_configured_release_label_but_not_an_unrelated_one() {
+        let labels = ["needs-release".to_string()];
+        assert_eq!(
+            release_evidence(&json!({"labels":[{"name":"needs-release"}]}), &labels).as_deref(),
+            Some("release label")
+        );
+        assert!(release_evidence(&json!({"labels":[{"name":"unrelated"}]}), &labels).is_none());
+    }
+
+    #[test]
+    fn release_evidence_detects_any_of_the_three_title_prefixes() {
+        assert!(release_evidence(&json!({"title": "chore: release 1.0"}), &[]).is_some());
+        assert!(release_evidence(&json!({"title": "release: cut 2.0"}), &[]).is_some());
+        assert!(release_evidence(&json!({"title": "unrelated change"}), &[]).is_none());
+    }
+
+    #[test]
+    fn pr_item_formats_title_url_and_detail_from_a_pull_request() {
+        let v = json!({
+            "number": 42,
+            "title": "Add feature",
+            "html_url": "https://example.com/pr/42",
+            "head": {"ref": "feature-x", "sha": "abcdef1"},
+            "base": {"ref": "main"},
+            "draft": false
+        });
+        let item = pr_item(&v);
+        assert_eq!(item.title, "#42 Add feature");
+        assert_eq!(item.url, "https://example.com/pr/42");
+        assert_eq!(item.detail, "feature-x -> main | head abcdef1 | open");
+    }
+
+    #[test]
+    fn release_item_formats_tag_url_and_published_detail() {
+        let v = json!({
+            "tag_name": "v1.2.3",
+            "html_url": "https://example.com/releases/v1.2.3",
+            "published_at": "2024-01-01T00:00:00Z"
+        });
+        let item = release_item(&v);
+        assert_eq!(item.title, "v1.2.3");
+        assert_eq!(item.url, "https://example.com/releases/v1.2.3");
+        assert_eq!(item.detail, "published 2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn run_item_formats_status_conclusion_and_sha() {
+        let v = json!({
+            "name": "CI",
+            "html_url": "https://example.com/runs/1",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "deadbee"
+        });
+        let item = run_item(&v);
+        assert_eq!(item.title, "CI");
+        assert_eq!(item.url, "https://example.com/runs/1");
+        assert_eq!(item.detail, "completed success | deadbee");
+    }
+
+    #[tokio::test]
+    async fn adapter_dispatches_github_and_forgejo_and_falls_back_to_unsupported() {
+        let _forgejo_guard = crate::test_support::FORGEJO_ENV_LOCK.lock().await;
+        let _gh_guard = GH_ENV_LOCK.lock().await;
+        let repo = test_repo();
+
+        // Force a fast, deterministic failure instead of depending on
+        // whether a real `gh` is installed or reachable in this environment.
+        let previous_gh = std::env::var("PHROURION_GH").ok();
+        unsafe {
+            std::env::set_var("PHROURION_GH", "/nonexistent/phrourion-test-gh-binary");
+        }
+        let github_state = adapter(&ProviderKind::Github).snapshot(&repo).await;
+        unsafe {
+            match &previous_gh {
+                Some(v) => std::env::set_var("PHROURION_GH", v),
+                None => std::env::remove_var("PHROURION_GH"),
+            }
+        }
+
+        let previous_url = std::env::var("PHROURION_FORGEJO_TEST_URL").ok();
+        unsafe {
+            // Nothing listens on this local port: an instant, network- and
+            // DNS-independent connection refusal (it's a literal IP).
+            std::env::set_var("PHROURION_FORGEJO_TEST_URL", "http://127.0.0.1:1");
+        }
+        let forgejo_state = adapter(&ProviderKind::Forgejo).snapshot(&repo).await;
+        unsafe {
+            match &previous_url {
+                Some(v) => std::env::set_var("PHROURION_FORGEJO_TEST_URL", v),
+                None => std::env::remove_var("PHROURION_FORGEJO_TEST_URL"),
+            }
+        }
+
+        let unsupported_state = adapter(&ProviderKind::Local).snapshot(&repo).await;
+
+        // Unsupported never attempts anything: every field is the disabled
+        // placeholder, not an error.
+        assert!(!unsupported_state.default_branch.supported);
+
+        // Github attempted (and failed to even start) a real call — a
+        // *supported* feature that errored, observably distinct both from
+        // "feature disabled" and from api()'s own success path.
+        let github_error = github_state
+            .default_branch
+            .error
+            .clone()
+            .unwrap_or_default();
+        assert!(github_state.default_branch.supported);
+        assert!(
+            github_error.contains("Cannot start"),
+            "expected a process-spawn failure, got: {github_error}"
+        );
+
+        assert!(forgejo_state.default_branch.supported);
+        assert!(forgejo_state.default_branch.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn api_retries_on_a_rate_limited_error_then_succeeds() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("count");
+        let script = format!(
+            "#!/bin/sh\n\
+             n=$(cat '{counter}' 2>/dev/null || echo 0)\n\
+             n=$((n+1))\n\
+             echo \"$n\" > '{counter}'\n\
+             if [ \"$n\" -lt 2 ]; then\n\
+             \x20 echo 'secondary rate limit exceeded' >&2\n\
+             \x20 exit 1\n\
+             fi\n\
+             printf '%s' '{{\"ok\":true}}'\n",
+            counter = counter.display()
+        );
+        let gh = write_executable(dir.path(), "fake-gh-retry", &script);
+        let repo = test_repo();
+        let previous_backoff = std::env::var("PHROURION_RATE_LIMIT_BACKOFF_MS").ok();
+        unsafe {
+            std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", "1");
+        }
+        let value = with_fake_gh(&gh, api(&repo, "some/endpoint", false)).await;
+        unsafe {
+            match &previous_backoff {
+                Some(v) => std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", v),
+                None => std::env::remove_var("PHROURION_RATE_LIMIT_BACKOFF_MS"),
+            }
+        }
+        let value = value.expect("should succeed after one retry");
+        assert_eq!(value["ok"], true);
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            "2",
+            "expected exactly one retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_gives_up_after_exhausting_rate_limit_retries() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("count");
+        let script = format!(
+            "#!/bin/sh\n\
+             n=$(cat '{counter}' 2>/dev/null || echo 0)\n\
+             n=$((n+1))\n\
+             echo \"$n\" > '{counter}'\n\
+             echo 'secondary rate limit exceeded' >&2\n\
+             exit 1\n",
+            counter = counter.display()
+        );
+        let gh = write_executable(dir.path(), "fake-gh-exhaust", &script);
+        let repo = test_repo();
+        let previous_backoff = std::env::var("PHROURION_RATE_LIMIT_BACKOFF_MS").ok();
+        unsafe {
+            std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", "1");
+        }
+        let result = with_fake_gh(&gh, api(&repo, "some/endpoint", false)).await;
+        unsafe {
+            match &previous_backoff {
+                Some(v) => std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", v),
+                None => std::env::remove_var("PHROURION_RATE_LIMIT_BACKOFF_MS"),
+            }
+        }
+        assert!(result.is_err());
+        // RATE_LIMIT_ATTEMPTS = 3: exactly 3 attempts — neither a premature
+        // give-up nor an infinite retry loop.
+        assert_eq!(std::fs::read_to_string(&counter).unwrap().trim(), "3");
+    }
+
+    #[tokio::test]
+    async fn github_snapshot_splits_releases_into_drafts_and_published() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            &[(
+                "releases",
+                r#"[[{"tag_name":"v1-draft","draft":true,"html_url":"u1","published_at":""},{"tag_name":"v2-published","draft":false,"html_url":"u2","published_at":"2024-01-01"}]]"#,
+            )],
+        );
+        let repo = test_repo();
+        let state = with_fake_gh(&gh, Github.snapshot(&repo)).await;
+
+        let drafts = state.drafts.data.expect("drafts should be populated");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].title, "v1-draft");
+
+        let published = state.published.data.expect("published should be populated");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].title, "v2-published");
+    }
+
+    #[tokio::test]
+    async fn github_snapshot_filters_pull_requests_out_of_issues() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            &[(
+                "issues",
+                r#"[[{"number":1,"title":"real issue","html_url":"u1","labels":[]},{"number":2,"title":"a pr shaped like an issue","html_url":"u2","labels":[],"pull_request":{}}]]"#,
+            )],
+        );
+        let repo = test_repo();
+        let state = with_fake_gh(&gh, Github.snapshot(&repo)).await;
+
+        let issues = state.issues.data.expect("issues should be populated");
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].title.contains("real issue"));
+    }
+
+    #[tokio::test]
+    async fn github_snapshot_publication_retains_every_running_attempt_plus_latest_completed() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            &[(
+                "actions/workflows",
+                r#"[{"workflow_runs":[
+                    {"name":"r1","html_url":"u1","status":"in_progress","conclusion":"","head_sha":"s1"},
+                    {"name":"r2","html_url":"u2","status":"completed","conclusion":"success","head_sha":"s2"},
+                    {"name":"r3","html_url":"u3","status":"completed","conclusion":"failure","head_sha":"s3"}
+                ]}]"#,
+            )],
+        );
+        let mut repo = test_repo();
+        repo.release_workflows = vec!["ci.yml".into()];
+        let state = with_fake_gh(&gh, Github.snapshot(&repo)).await;
+
+        let items = state
+            .publication
+            .data
+            .expect("publication should be populated");
+        assert_eq!(
+            items.len(),
+            2,
+            "should keep the running run plus only the latest completed one"
+        );
+        assert_eq!(items[0].title, "r1");
+        assert_eq!(items[1].title, "r2");
+    }
+
+    #[tokio::test]
+    async fn initial_backoff_defaults_to_one_second_and_honors_the_test_override() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let previous = std::env::var("PHROURION_RATE_LIMIT_BACKOFF_MS").ok();
+        unsafe {
+            std::env::remove_var("PHROURION_RATE_LIMIT_BACKOFF_MS");
+        }
+        assert_eq!(initial_backoff(), RATE_LIMIT_BACKOFF);
+
+        unsafe {
+            std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", "42");
+        }
+        assert_eq!(initial_backoff(), Duration::from_millis(42));
+
+        unsafe {
+            match &previous {
+                Some(v) => std::env::set_var("PHROURION_RATE_LIMIT_BACKOFF_MS", v),
+                None => std::env::remove_var("PHROURION_RATE_LIMIT_BACKOFF_MS"),
+            }
+        }
+    }
+
+    #[test]
+    fn repo_url_is_none_for_local_and_a_github_style_https_url_otherwise() {
+        let mut repo = test_repo();
+        repo.identity.kind = ProviderKind::Local;
+        assert_eq!(repo_url(&repo), None);
+
+        repo.identity.kind = ProviderKind::Github;
+        repo.identity.host = "example.com".into();
+        repo.identity.project = "org/repo".into();
+        assert_eq!(repo_url(&repo), Some("https://example.com/org/repo".into()));
     }
 }

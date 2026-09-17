@@ -89,6 +89,23 @@ async fn pulls_only_registered_checkout_to_previewed_commit() {
 }
 
 #[tokio::test]
+async fn fetch_updates_the_remote_tracking_ref_without_touching_the_working_tree() {
+    let f = Fixture::new();
+    let repo = registry::entry(&f.b, None, None).await.unwrap();
+    f.advance();
+    let before = git_cmd(&f.b, &["rev-parse", "origin/main"]);
+    git::fetch(&repo).await.unwrap();
+    let after = git_cmd(&f.b, &["rev-parse", "origin/main"]);
+    assert_ne!(
+        before, after,
+        "fetch should advance the origin/main tracking ref"
+    );
+    assert_eq!(git_cmd(&f.a, &["rev-parse", "HEAD"]), after);
+    // A fetch never touches the working tree, only tracking refs.
+    assert!(!f.b.join("new.txt").exists());
+}
+
+#[tokio::test]
 async fn dirty_and_changed_previews_are_refused() {
     let f = Fixture::new();
     let repo = registry::entry(&f.b, None, None).await.unwrap();
@@ -201,6 +218,31 @@ async fn renamed_files_and_untracked_names_do_not_confuse_status_parser() {
     assert_eq!(state.staged, 1);
     assert_eq!(state.untracked, 1);
     assert_eq!(state.changes.len(), 2);
+}
+
+#[tokio::test]
+async fn staged_and_unstaged_modifications_are_counted_independently() {
+    let f = Fixture::new();
+    std::fs::write(f.b.join("tracked.txt"), "original").unwrap();
+    git_cmd(&f.b, &["add", "tracked.txt"]);
+    git_cmd(&f.b, &["commit", "-m", "add tracked file"]);
+    git_cmd(&f.b, &["push"]);
+    let repo = registry::entry(&f.b, None, None).await.unwrap();
+
+    // A change staged with `git add` but not yet touched again in the
+    // working tree: staged, not modified.
+    std::fs::write(f.b.join("tracked.txt"), "staged change").unwrap();
+    git_cmd(&f.b, &["add", "tracked.txt"]);
+    let state = git::snapshot(&repo).await.unwrap();
+    assert_eq!(state.staged, 1);
+    assert_eq!(state.modified, 0);
+
+    // The same file edited again without re-staging: both staged (from the
+    // prior `add`) and modified (the new, unstaged edit).
+    std::fs::write(f.b.join("tracked.txt"), "unstaged change").unwrap();
+    let state = git::snapshot(&repo).await.unwrap();
+    assert_eq!(state.staged, 1);
+    assert_eq!(state.modified, 1);
 }
 
 #[tokio::test]
