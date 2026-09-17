@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/AraneaDev/phrourion/compare/v0.1.3...v0.2.0) (2026-09-17)
+
+
+### Features
+
+* GitHub issues, review requests, PR checkout, and desktop attention alerts ([#12](https://github.com/AraneaDev/phrourion/issues/12)) ([32dec84](https://github.com/AraneaDev/phrourion/commit/32dec847f263af6d4885913f3c1f04f9b8ea6bf5))
+
 ## [0.1.3](https://github.com/AraneaDev/phrourion/compare/v0.1.2...v0.1.3) (2026-09-16)
 
 
