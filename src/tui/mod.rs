@@ -28,8 +28,8 @@ mod tests {
     use super::*;
     use super::{
         animation::{
-            EXIT_FRAMES, SCENE_WIDTH, STARTUP_DURATION_MS, STARTUP_FRAMES, draw_animation,
-            exit_scene, exit_skips, startup_scene, startup_skips,
+            EXIT_FRAMES, SCENE_HEIGHT, SCENE_WIDTH, STARTUP_DURATION_MS, STARTUP_FRAMES,
+            draw_animation, exit_scene, exit_skips, startup_scene, startup_skips,
         },
         app::{AttentionPriority, known_count},
         cache::CACHE_PLACEHOLDER,
@@ -687,5 +687,58 @@ mod tests {
         app.record("entry 100");
         assert_eq!(app.log.len(), 100, "log must stay capped at 100 entries");
         assert_eq!(app.log[0], "entry 1", "the oldest entry must be dropped");
+    }
+
+    #[test]
+    fn leg_glyph_is_drawn_two_rows_below_the_guard_and_alternates_by_frame_parity() {
+        let leg_at = |scene: &str, x: usize, y: usize| -> String {
+            scene
+                .lines()
+                .nth(y)
+                .unwrap()
+                .chars()
+                .skip(x)
+                .take(3)
+                .collect()
+        };
+        // startup frame 0: guard at (2, 9) (see startup_guard_moves_through_...);
+        // even step -> "/ \".
+        assert_eq!(leg_at(&startup_scene(0), 2, 11), "/ \\");
+        // startup frame 1: guard at (8, 9); odd step -> " /|".
+        assert_eq!(leg_at(&startup_scene(1), 8, 11), " /|");
+    }
+
+    #[test]
+    fn tower_light_is_lit_only_at_the_final_startup_frame_and_the_first_exiting_frame() {
+        assert!(startup_scene(5).contains('*'));
+        assert!(!startup_scene(0).contains('*'));
+        assert!(exit_scene(0).contains('*'));
+        assert!(!exit_scene(5).contains('*'));
+    }
+
+    #[test]
+    fn draw_animation_colors_rows_15_and_17_gray_and_others_cyan() {
+        let scene = startup_scene(0);
+        let backend = ratatui::backend::TestBackend::new(SCENE_WIDTH as u16, SCENE_HEIGHT as u16);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_animation(frame, scene.clone()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..SCENE_HEIGHT as u16 {
+            let expected = if y == 15 || y == 17 {
+                Color::DarkGray
+            } else {
+                Color::Cyan
+            };
+            // The line's style applies across its whole rendered span
+            // (including leading space characters), so column 0 reflects
+            // the row's color regardless of what glyph sits there.
+            assert_eq!(
+                buffer[(0, y)].fg,
+                expected,
+                "row {y} should be {expected:?}"
+            );
+        }
     }
 }

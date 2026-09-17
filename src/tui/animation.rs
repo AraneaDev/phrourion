@@ -15,7 +15,7 @@ const STARTUP_FRAME_MS: u64 = 900;
 pub(super) const STARTUP_DURATION_MS: u64 = STARTUP_FRAME_MS * STARTUP_FRAMES as u64;
 pub(super) const EXIT_FRAMES: usize = STARTUP_FRAMES;
 pub(super) const SCENE_WIDTH: usize = 40;
-const SCENE_HEIGHT: usize = 18;
+pub(super) const SCENE_HEIGHT: usize = 18;
 
 fn tower_scene(frame: usize, exiting: bool) -> String {
     let step = frame.min(5);
