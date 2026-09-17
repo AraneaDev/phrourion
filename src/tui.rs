@@ -527,9 +527,9 @@ fn triage(app: &App) -> (usize, usize, usize, usize, usize, usize, String) {
 }
 
 fn health_glyph(row: &RowState) -> &'static str {
-    if row.local.error.is_some()
-        || row.remote.default_branch.error.is_some()
-        || row.remote.ci.error.is_some()
+    if cell_state(&row.local) == CellState::Error
+        || cell_state(&row.remote.default_branch) == CellState::Error
+        || cell_state(&row.remote.ci) == CellState::Error
     {
         "!"
     } else if row.local.data.as_ref().is_some_and(LocalState::dirty) {
