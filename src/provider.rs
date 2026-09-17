@@ -512,6 +512,57 @@ mod tests {
         assert!(release_evidence(&json!({"labels":[{"name":"unrelated"}]}), &labels).is_none());
     }
 
+    #[test]
+    fn release_evidence_detects_any_of_the_three_title_prefixes() {
+        assert!(release_evidence(&json!({"title": "chore: release 1.0"}), &[]).is_some());
+        assert!(release_evidence(&json!({"title": "release: cut 2.0"}), &[]).is_some());
+        assert!(release_evidence(&json!({"title": "unrelated change"}), &[]).is_none());
+    }
+
+    #[test]
+    fn pr_item_formats_title_url_and_detail_from_a_pull_request() {
+        let v = json!({
+            "number": 42,
+            "title": "Add feature",
+            "html_url": "https://example.com/pr/42",
+            "head": {"ref": "feature-x", "sha": "abcdef1"},
+            "base": {"ref": "main"},
+            "draft": false
+        });
+        let item = pr_item(&v);
+        assert_eq!(item.title, "#42 Add feature");
+        assert_eq!(item.url, "https://example.com/pr/42");
+        assert_eq!(item.detail, "feature-x -> main | head abcdef1 | open");
+    }
+
+    #[test]
+    fn release_item_formats_tag_url_and_published_detail() {
+        let v = json!({
+            "tag_name": "v1.2.3",
+            "html_url": "https://example.com/releases/v1.2.3",
+            "published_at": "2024-01-01T00:00:00Z"
+        });
+        let item = release_item(&v);
+        assert_eq!(item.title, "v1.2.3");
+        assert_eq!(item.url, "https://example.com/releases/v1.2.3");
+        assert_eq!(item.detail, "published 2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn run_item_formats_status_conclusion_and_sha() {
+        let v = json!({
+            "name": "CI",
+            "html_url": "https://example.com/runs/1",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "deadbee"
+        });
+        let item = run_item(&v);
+        assert_eq!(item.title, "CI");
+        assert_eq!(item.url, "https://example.com/runs/1");
+        assert_eq!(item.detail, "completed success | deadbee");
+    }
+
     #[tokio::test]
     async fn adapter_dispatches_github_and_forgejo_and_falls_back_to_unsupported() {
         let _guard = crate::test_support::FORGEJO_ENV_LOCK.lock().await;
