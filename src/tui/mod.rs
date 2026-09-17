@@ -604,13 +604,12 @@ mod tests {
     }
 
     #[test]
-    fn health_glyph_shows_spinner_only_when_a_fetch_is_in_flight() {
-        let mut busy_row = test_row(LocalState::default());
-        busy_row.local.data = None;
-        busy_row.local_busy = true;
-        busy_row.remote_busy = false;
-        assert_ne!(health_glyph(&busy_row), "·");
-
+    fn health_glyph_shows_idle_dot_only_when_no_fetch_is_in_flight() {
+        // Not `assert_ne!(health_glyph(&busy_row), "·")`: spinner_frame's
+        // own first frame IS "·", so that assertion would flake roughly
+        // one time in six depending on the real clock at test time. The
+        // idle case alone is deterministic (it never calls animation_frame)
+        // and still catches the && -> || mutation on this condition.
         let mut idle_row = test_row(LocalState::default());
         idle_row.local.data = None;
         idle_row.local_busy = false;
@@ -738,6 +737,10 @@ mod tests {
 
     #[test]
     fn sync_placeholder_shows_error_glyph_only_when_local_state_itself_errored() {
+        // health_glyph() also renders "!" for an errored local (in the
+        // Repository column, via its own, separately-tested condition), so
+        // a plain substring search can't isolate the Sync column's own
+        // placeholder — it must be read at its exact column position.
         let mut error_row = test_row(LocalState::default());
         error_row.local = Observation::failure("boom");
         error_row.repo.name = "err-repo".into();
@@ -752,25 +755,69 @@ mod tests {
         app.rows.push(error_row);
         app.rows.push(loading_row);
 
-        // Narrow layout hides the Local/Branch/PRs/etc columns, so the
-        // Sync column's placeholder is the only "!"/"…" on each row's line.
-        let backend = ratatui::backend::TestBackend::new(80, 30);
+        let backend = ratatui::backend::TestBackend::new(140, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buffer = terminal.backend().buffer();
-        let lines: Vec<String> = (0..buffer.area.height)
+        let lines: Vec<Vec<char>> = (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
+                    .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect()
             })
             .collect();
 
-        let err_line = lines.iter().find(|l| l.contains("err-repo")).unwrap();
-        let load_line = lines.iter().find(|l| l.contains("load-repo")).unwrap();
-        assert!(err_line.contains('!'), "{err_line:?}");
-        assert!(!load_line.contains('!'), "{load_line:?}");
-        assert!(load_line.contains('…'), "{load_line:?}");
+        fn find_end(line: &[char], needle: &str) -> Option<usize> {
+            let needle: Vec<char> = needle.chars().collect();
+            (0..=line.len().checked_sub(needle.len())?)
+                .find(|&start| line[start..start + needle.len()] == needle[..])
+                .map(|start| start + needle.len())
+        }
+
+        let header_line = lines
+            .iter()
+            .find(|l| find_end(l, "Sync*").is_some())
+            .expect("header row should be present");
+        let sync_col = find_end(header_line, "Sync*").unwrap() - 1;
+
+        let err_line = lines
+            .iter()
+            .find(|l| find_end(l, "err-repo").is_some())
+            .unwrap();
+        let load_line = lines
+            .iter()
+            .find(|l| find_end(l, "load-repo").is_some())
+            .unwrap();
+
+        assert_eq!(
+            err_line[sync_col],
+            '!',
+            "{:?}",
+            err_line.iter().collect::<String>()
+        );
+        assert_eq!(
+            load_line[sync_col],
+            '…',
+            "{:?}",
+            load_line.iter().collect::<String>()
+        );
+    }
+
+    #[test]
+    fn calm_count_only_counts_rows_with_the_calm_glyph() {
+        let mut app = App::new(Vec::new());
+        app.rows.push(test_row(LocalState::default())); // calm: ●
+        app.rows.push(test_row(LocalState::default())); // calm: ●
+        app.rows.push(test_row(LocalState {
+            staged: 1,
+            ..LocalState::default()
+        })); // dirty: ◆, not calm
+
+        let text = render_text(&app);
+        // meter(2, 3, 8) = 6 filled blocks; meter(1, 3, 8) (the wrong count
+        // a `==` -> `!=` mutation would produce) is 3 -- distinguishable by
+        // counting. Nothing else in the UI renders '█'.
+        assert_eq!(text.matches('█').count(), 6, "{text}");
     }
 
     #[test]
