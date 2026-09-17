@@ -620,4 +620,22 @@ mod tests {
         assert_eq!(position(3), (29, 9));
         assert_eq!(position(4), (34, 9));
     }
+
+    #[test]
+    fn startup_guard_moves_through_each_expected_position() {
+        let position = |frame: usize| {
+            let scene = startup_scene(frame);
+            for (y, line) in scene.lines().enumerate() {
+                if let Some(x) = line.find(" o ") {
+                    return (x, y);
+                }
+            }
+            panic!("guard not found in startup scene frame {frame}: {scene}");
+        };
+        assert_eq!(position(0), (2, 9));
+        assert_eq!(position(1), (8, 9));
+        assert_eq!(position(2), (13, 9));
+        assert_eq!(position(3), (18, 9));
+        assert_eq!(position(4), (18, 7));
+    }
 }
