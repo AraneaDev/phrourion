@@ -198,7 +198,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-Install the repository hook once so the dashboard screenshot stays current:
+Install the repository hooks once so the dashboard screenshot stays current and
+commit messages are checked for Conventional Commits:
 
 ```bash
 git config core.hooksPath .githooks
