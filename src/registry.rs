@@ -11,8 +11,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DEFAULT_WORKSPACE: &str = "AraneaDev";
-
 #[derive(Default, Serialize, Deserialize)]
 pub struct Registry {
     #[serde(default)]
@@ -34,16 +32,6 @@ pub fn load(path: &Path) -> Result<Registry> {
         Ok(text) => {
             let mut registry: Registry =
                 toml::from_str(&text).context("Invalid repository registry")?;
-            if !registry.repos.is_empty()
-                && !text
-                    .lines()
-                    .any(|line| line.trim_start().starts_with("workspaces ="))
-            {
-                registry.workspaces.push(DEFAULT_WORKSPACE.into());
-                for repo in &mut registry.repos {
-                    repo.workspaces.push(DEFAULT_WORKSPACE.into());
-                }
-            }
             registry.active_workspace = registry.active_workspace.as_deref().and_then(|active| {
                 registry
                     .workspaces
@@ -458,19 +446,19 @@ mod tests {
     fn repo_workspace_memberships_round_trip_through_toml() {
         let registry = Registry {
             repos: vec![Repo {
-                workspaces: vec!["AraneaDev".into()],
+                workspaces: vec!["Primary".into()],
                 ..repo("one", "demo", "/tmp/demo".into())
             }],
-            workspaces: vec!["AraneaDev".into()],
-            active_workspace: Some("AraneaDev".into()),
+            workspaces: vec!["Primary".into()],
+            active_workspace: Some("Primary".into()),
         };
 
         let text = toml::to_string_pretty(&registry).unwrap();
-        assert!(text.contains("workspaces = [\"AraneaDev\"]"));
+        assert!(text.contains("workspaces = [\"Primary\"]"));
         let decoded: Registry = toml::from_str(&text).unwrap();
-        assert_eq!(decoded.repos[0].workspaces, ["AraneaDev"]);
-        assert_eq!(decoded.workspaces, ["AraneaDev"]);
-        assert_eq!(decoded.active_workspace.as_deref(), Some("AraneaDev"));
+        assert_eq!(decoded.repos[0].workspaces, ["Primary"]);
+        assert_eq!(decoded.workspaces, ["Primary"]);
+        assert_eq!(decoded.active_workspace.as_deref(), Some("Primary"));
     }
 
     #[test]
@@ -564,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_registries_migrate_existing_repositories_into_araneadev() {
+    fn legacy_registries_do_not_invent_workspace_memberships() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("repos.toml");
         let legacy = toml::to_string_pretty(&Registry {
@@ -581,8 +569,8 @@ mod tests {
 
         let registry = load(&config).unwrap();
 
-        assert_eq!(registry.workspaces, ["AraneaDev"]);
-        assert_eq!(registry.repos[0].workspaces, ["AraneaDev"]);
+        assert!(registry.workspaces.is_empty());
+        assert!(registry.repos[0].workspaces.is_empty());
     }
 
     #[test]
@@ -641,12 +629,12 @@ mod tests {
     fn active_workspace_persists_canonical_name_and_falls_back_for_invalid_saved_value() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("repos.toml");
-        create_workspace(&config, "AraneaDev").unwrap();
+        create_workspace(&config, "Primary").unwrap();
 
-        set_active_workspace(&config, Some("araneadev")).unwrap();
+        set_active_workspace(&config, Some("primary")).unwrap();
         assert_eq!(
             load(&config).unwrap().active_workspace.as_deref(),
-            Some("AraneaDev")
+            Some("Primary")
         );
         set_active_workspace(&config, Some("All")).unwrap();
         assert_eq!(load(&config).unwrap().active_workspace, None);
@@ -654,7 +642,7 @@ mod tests {
 
         fs::write(
             &config,
-            "workspaces = [\"AraneaDev\"]\nactive_workspace = \"Missing\"\n",
+            "workspaces = [\"Primary\"]\nactive_workspace = \"Missing\"\n",
         )
         .unwrap();
         assert_eq!(load(&config).unwrap().active_workspace, None);
