@@ -304,12 +304,13 @@ mod tests {
 
     #[tokio::test]
     async fn open_falls_back_to_the_first_supported_terminal_on_path() {
-        let bin = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir_in(".").unwrap();
         let repo = tempfile::tempdir().unwrap();
         let capture = bin.path().join("args");
         write_fake_terminal(bin.path(), "foot", &capture);
+        let relative_bin = PathBuf::from(bin.path().file_name().unwrap());
 
-        let message = open_with(repo.path(), None, Some(bin.path().as_os_str()))
+        let message = open_with(repo.path(), None, Some(relative_bin.as_os_str()))
             .await
             .unwrap();
         let args = wait_for_capture(&capture).await;
