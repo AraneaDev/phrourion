@@ -177,15 +177,15 @@ mod tests {
         let mut alpha = test_row(LocalState::default()).repo;
         alpha.id = "alpha".into();
         alpha.name = "alpha".into();
-        alpha.workspaces = vec!["AraneaDev".into()];
+        alpha.workspaces = vec!["Primary".into()];
         let mut beta = test_row(LocalState::default()).repo;
         beta.id = "beta".into();
         beta.name = "beta".into();
         beta.workspaces = vec!["Other".into()];
         let mut app = App::with_registry(Registry {
             repos: vec![alpha, beta],
-            workspaces: vec!["AraneaDev".into(), "Other".into()],
-            active_workspace: Some("AraneaDev".into()),
+            workspaces: vec!["Primary".into(), "Other".into()],
+            active_workspace: Some("Primary".into()),
         });
 
         assert_eq!(app.visible().len(), 1);
@@ -198,7 +198,7 @@ mod tests {
         let mut alpha = test_row(LocalState::default()).repo;
         alpha.id = "alpha".into();
         alpha.name = "alpha".into();
-        alpha.workspaces = vec!["AraneaDev".into()];
+        alpha.workspaces = vec!["Primary".into()];
         let mut beta = test_row(LocalState::default()).repo;
         beta.id = "beta".into();
         beta.name = "beta".into();
@@ -206,7 +206,7 @@ mod tests {
 
         let app = App::with_registry(Registry {
             repos: vec![alpha, beta],
-            workspaces: vec!["AraneaDev".into(), "Other".into()],
+            workspaces: vec!["Primary".into(), "Other".into()],
             active_workspace: Some("Missing".into()),
         });
 
