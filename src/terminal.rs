@@ -270,6 +270,19 @@ mod tests {
     }
 
     #[test]
+    fn terminal_path_uses_basename_for_arguments_but_keeps_program_path() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            command_for(dir.path(), "/usr/bin/kitty").unwrap(),
+            (
+                "/usr/bin/kitty".into(),
+                vec!["--directory".into(), dir.path().display().to_string()],
+            )
+        );
+    }
+
+    #[test]
     fn nonexistent_path_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing");
@@ -320,5 +333,47 @@ mod tests {
             args,
             format!("--working-directory\n{}\n", repo.path().display())
         );
+    }
+
+    #[tokio::test]
+    async fn open_rejects_when_no_supported_terminal_is_available() {
+        let repo = tempfile::tempdir().unwrap();
+
+        let error = open_with(repo.path(), None, Some(OsStr::new("")))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("No supported terminal found"));
+    }
+
+    #[tokio::test]
+    async fn open_starts_the_terminal_in_the_repository_directory() {
+        let bin = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let capture = bin.path().join("args");
+        let executable = bin.path().join("foot");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\npwd > '{}.cwd'\n",
+                capture.display(),
+                capture.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).unwrap();
+        }
+
+        open_with(repo.path(), None, Some(bin.path().as_os_str()))
+            .await
+            .unwrap();
+        let working_directory = wait_for_capture(&capture.with_extension("cwd")).await;
+
+        assert_eq!(working_directory.trim(), repo.path().to_string_lossy());
     }
 }

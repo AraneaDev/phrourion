@@ -194,6 +194,27 @@ mod tests {
     }
 
     #[test]
+    fn invalid_saved_workspace_falls_back_to_all_repositories() {
+        let mut alpha = test_row(LocalState::default()).repo;
+        alpha.id = "alpha".into();
+        alpha.name = "alpha".into();
+        alpha.workspaces = vec!["AraneaDev".into()];
+        let mut beta = test_row(LocalState::default()).repo;
+        beta.id = "beta".into();
+        beta.name = "beta".into();
+        beta.workspaces = vec!["Other".into()];
+
+        let app = App::with_registry(Registry {
+            repos: vec![alpha, beta],
+            workspaces: vec!["AraneaDev".into(), "Other".into()],
+            active_workspace: Some("Missing".into()),
+        });
+
+        assert_eq!(app.active_workspace, None);
+        assert_eq!(app.visible().len(), 2);
+    }
+
+    #[test]
     fn attention_prioritizes_confirmed_ci_and_pending_releases() {
         let mut app = App::new(Vec::new());
         for name in ["quiet", "release", "failed", "stale", "unsupported"] {
