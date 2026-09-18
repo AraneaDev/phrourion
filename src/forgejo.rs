@@ -688,6 +688,7 @@ mod tests {
             release_workflows: vec![],
             release_labels: vec![],
             issue_labels: vec![],
+            workspaces: vec![],
         };
         let state = with_test_url(&base, Forgejo.snapshot(&repo)).await;
 

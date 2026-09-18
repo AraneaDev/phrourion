@@ -88,6 +88,7 @@ mod tests {
                 release_workflows: Vec::new(),
                 release_labels: Vec::new(),
                 issue_labels: Vec::new(),
+                workspaces: Vec::new(),
             },
             local: Observation::success(local),
             remote: RemoteState::default(),
