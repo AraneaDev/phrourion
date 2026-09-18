@@ -11,6 +11,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const DEFAULT_WORKSPACE: &str = "AraneaDev";
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct Registry {
     #[serde(default)]
@@ -32,6 +34,16 @@ pub fn load(path: &Path) -> Result<Registry> {
         Ok(text) => {
             let mut registry: Registry =
                 toml::from_str(&text).context("Invalid repository registry")?;
+            if !registry.repos.is_empty()
+                && !text
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("workspaces ="))
+            {
+                registry.workspaces.push(DEFAULT_WORKSPACE.into());
+                for repo in &mut registry.repos {
+                    repo.workspaces.push(DEFAULT_WORKSPACE.into());
+                }
+            }
             registry.active_workspace = registry.active_workspace.as_deref().and_then(|active| {
                 registry
                     .workspaces
@@ -281,6 +293,29 @@ pub fn add_to_workspace(config: &Path, workspace: &str, repo: &str) -> Result<()
     })
 }
 
+pub fn add_many_to_workspace(config: &Path, workspace: &str, repos: &[String]) -> Result<()> {
+    update(config, |registry| {
+        let workspace = find_workspace(registry, workspace)?.to_string();
+        let indexes = repos
+            .iter()
+            .map(|repo| find_repo(registry, repo))
+            .collect::<Result<Vec<_>>>()?;
+        for index in indexes {
+            if !registry.repos[index]
+                .workspaces
+                .iter()
+                .any(|membership| workspace_eq(membership, &workspace))
+            {
+                registry.repos[index].workspaces.push(workspace.clone());
+                registry.repos[index]
+                    .workspaces
+                    .sort_by_key(|membership| membership.to_lowercase());
+            }
+        }
+        Ok(())
+    })
+}
+
 pub fn remove_from_workspace(config: &Path, workspace: &str, repo: &str) -> Result<()> {
     update(config, |registry| {
         let workspace = find_workspace(registry, workspace)?.to_string();
@@ -288,6 +323,22 @@ pub fn remove_from_workspace(config: &Path, workspace: &str, repo: &str) -> Resu
         registry.repos[repo]
             .workspaces
             .retain(|membership| !workspace_eq(membership, &workspace));
+        Ok(())
+    })
+}
+
+pub fn remove_many_from_workspace(config: &Path, workspace: &str, repos: &[String]) -> Result<()> {
+    update(config, |registry| {
+        let workspace = find_workspace(registry, workspace)?.to_string();
+        let indexes = repos
+            .iter()
+            .map(|repo| find_repo(registry, repo))
+            .collect::<Result<Vec<_>>>()?;
+        for index in indexes {
+            registry.repos[index]
+                .workspaces
+                .retain(|membership| !workspace_eq(membership, &workspace));
+        }
         Ok(())
     })
 }
@@ -510,6 +561,44 @@ mod tests {
 
         add_to_workspace(&config, "Team", "one").unwrap();
         assert_eq!(load(&config).unwrap().repos[0].workspaces, ["Team"]);
+    }
+
+    #[test]
+    fn legacy_registries_migrate_existing_repositories_into_araneadev() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("repos.toml");
+        let legacy = toml::to_string_pretty(&Registry {
+            repos: vec![repo("one", "demo", dir.path().join("demo"))],
+            ..Registry::default()
+        })
+        .unwrap();
+        let legacy = legacy
+            .lines()
+            .filter(|line| !line.starts_with("workspaces") && !line.starts_with("active_workspace"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&config, legacy).unwrap();
+
+        let registry = load(&config).unwrap();
+
+        assert_eq!(registry.workspaces, ["AraneaDev"]);
+        assert_eq!(registry.repos[0].workspaces, ["AraneaDev"]);
+    }
+
+    #[test]
+    fn batch_membership_changes_validate_every_repository_before_mutating() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("repos.toml");
+        add(&config, repo("one", "one", dir.path().join("one"))).unwrap();
+        create_workspace(&config, "Team").unwrap();
+
+        assert!(add_many_to_workspace(&config, "Team", &["one".into(), "missing".into()]).is_err());
+        assert!(load(&config).unwrap().repos[0].workspaces.is_empty());
+
+        assert!(
+            remove_many_from_workspace(&config, "Team", &["one".into(), "missing".into()]).is_err()
+        );
+        assert!(load(&config).unwrap().repos[0].workspaces.is_empty());
     }
 
     #[test]

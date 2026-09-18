@@ -214,8 +214,8 @@ async fn main() -> Result<()> {
                 if repos.is_empty() {
                     bail!("At least one repository is required");
                 }
+                registry::add_many_to_workspace(&config, &name, &repos)?;
                 for repo in repos {
-                    registry::add_to_workspace(&config, &name, &repo)?;
                     println!("Added {repo} to {name}");
                 }
             }
@@ -223,8 +223,8 @@ async fn main() -> Result<()> {
                 if repos.is_empty() {
                     bail!("At least one repository is required");
                 }
+                registry::remove_many_from_workspace(&config, &name, &repos)?;
                 for repo in repos {
-                    registry::remove_from_workspace(&config, &name, &repo)?;
                     println!("Removed {repo} from {name}");
                 }
             }
