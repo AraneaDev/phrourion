@@ -59,6 +59,7 @@ fn executable_path(program: &str, path_value: Option<&OsStr>) -> Option<std::pat
         std::env::split_paths(path)
             .map(|directory| directory.join(program))
             .find(|candidate| is_executable(candidate))
+            .and_then(|candidate| std::fs::canonicalize(candidate).ok())
     })
 }
 
@@ -70,8 +71,9 @@ fn selected_terminal(terminal_value: Option<&OsStr>, path_value: Option<&OsStr>)
             return Ok(if Path::new(&terminal).components().count() > 1 {
                 std::fs::canonicalize(terminal)
                     .with_context(|| format!("Cannot resolve terminal {terminal}"))?
-                    .to_string_lossy()
-                    .into_owned()
+                    .to_str()
+                    .context("Terminal executable path is not valid UTF-8")?
+                    .to_owned()
             } else {
                 terminal.to_string()
             });
@@ -81,7 +83,13 @@ fn selected_terminal(terminal_value: Option<&OsStr>, path_value: Option<&OsStr>)
     SUPPORTED_TERMINALS
         .iter()
         .find_map(|terminal| executable_path(terminal, path_value))
-        .map(|terminal| terminal.to_string_lossy().into_owned())
+        .map(|terminal| {
+            terminal
+                .to_str()
+                .context("Terminal executable path is not valid UTF-8")
+                .map(str::to_owned)
+        })
+        .transpose()?
         .context(
             "No supported terminal found (tried foot, kitty, alacritty, wezterm, gnome-terminal)",
         )
