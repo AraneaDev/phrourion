@@ -52,7 +52,9 @@ fn is_executable(path: &Path) -> bool {
 fn executable_path(program: &str, path_value: Option<&OsStr>) -> Option<std::path::PathBuf> {
     let path = Path::new(program);
     if path.components().count() > 1 {
-        return is_executable(path).then(|| path.to_path_buf());
+        return is_executable(path)
+            .then(|| std::fs::canonicalize(path).ok())
+            .flatten();
     }
 
     path_value.and_then(|path| {
@@ -66,17 +68,12 @@ fn executable_path(program: &str, path_value: Option<&OsStr>) -> Option<std::pat
 fn selected_terminal(terminal_value: Option<&OsStr>, path_value: Option<&OsStr>) -> Result<String> {
     if let Some(terminal) = terminal_value.and_then(|value| value.to_str()) {
         if SUPPORTED_TERMINALS.contains(&terminal_name(terminal))
-            && executable_path(terminal, path_value).is_some()
+            && let Some(path) = executable_path(terminal, path_value)
         {
-            return Ok(if Path::new(&terminal).components().count() > 1 {
-                std::fs::canonicalize(terminal)
-                    .with_context(|| format!("Cannot resolve terminal {terminal}"))?
-                    .to_str()
-                    .context("Terminal executable path is not valid UTF-8")?
-                    .to_owned()
-            } else {
-                terminal.to_string()
-            });
+            return path
+                .to_str()
+                .context("Terminal executable path is not valid UTF-8")
+                .map(str::to_owned);
         }
     }
 
@@ -147,6 +144,7 @@ async fn open_with(
 mod tests {
     use super::{command_for, open_with};
     use std::{
+        ffi::OsStr,
         fs,
         path::{Path, PathBuf},
         time::Duration,
@@ -286,11 +284,15 @@ mod tests {
         let bin = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         let capture = bin.path().join("args");
-        let kitty = write_fake_terminal(bin.path(), "kitty", &capture);
+        write_fake_terminal(bin.path(), "kitty", &capture);
 
-        let message = open_with(repo.path(), Some(kitty.as_os_str()), None)
-            .await
-            .unwrap();
+        let message = open_with(
+            repo.path(),
+            Some(OsStr::new("kitty")),
+            Some(bin.path().as_os_str()),
+        )
+        .await
+        .unwrap();
         let args = wait_for_capture(&capture).await;
 
         assert_eq!(
