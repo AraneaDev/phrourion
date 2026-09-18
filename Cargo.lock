@@ -870,6 +870,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "fs2",
+ "libc",
  "ratatui",
  "reqwest",
  "serde",

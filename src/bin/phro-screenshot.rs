@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
         .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("docs/screenshots/dashboard.svg"));
-    let mut app = tui::App::new(registry::load(&config)?.repos);
+    let mut app = tui::App::with_registry(registry::load(&config)?);
     if env::var_os("PHROURION_SCREENSHOT_LIVE").is_some() {
         for row in &mut app.rows {
             row.local = match git::snapshot(&row.repo).await {

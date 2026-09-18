@@ -314,8 +314,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .split(frame.area());
     frame.render_widget(
         Paragraph::new(format!(
-            " P H R O U R I O N  |  {} repositories  |  filter: {}",
-            app.rows.len(),
+            " P H R O U R I O N  |  workspace: {}  |  {} repositories  |  filter: {}",
+            app.active_workspace.as_deref().unwrap_or("All"),
+            app.visible().len(),
             clean(&app.filter)
         ))
         .style(
@@ -564,6 +565,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
             clean(&row.repo.identity.project)
         ));
         details.push_str(&format!(
+            "Workspaces: {}\n",
+            if row.repo.workspaces.is_empty() {
+                "-".into()
+            } else {
+                row.repo.workspaces.join(", ")
+            }
+        ));
+        details.push_str(&format!(
             "*Sync uses Git tracking refs. Last fetch: {}\n",
             row.fetched
                 .map(|t| format!("{}s ago", t.elapsed().as_secs()))
@@ -648,7 +657,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
     } else {
         details.push_str(
-            "No matching repositories. Press a to add a checkout, or use phrourion discover PATH.",
+            "No repositories in this view. Press w to switch workspace, n to create one, a to add a checkout, or use phrourion discover PATH.",
         );
     }
     let title = [
@@ -673,13 +682,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let hint = match &app.mode {
         Mode::Add(s) => format!("Add: PATH | REMOTE (remote optional): {}  [Enter save / Esc cancel]", clean(s)),
         Mode::Filter => "Type filter, Enter done, Esc clear".into(),
+        Mode::Workspace(s) => format!("Workspace: {}  [Enter select / empty All / Esc cancel]", clean(s)),
+        Mode::CreateWorkspace(s) => format!("Create workspace: {}  [Enter save / Esc cancel]", clean(s)),
+        Mode::AddWorkspace(s) => format!("Add selected repo to workspace (blank = active): {}  [Enter save / Esc cancel]", clean(s)),
+        Mode::RemoveWorkspace(s) => format!("Remove selected repo from workspace (blank = active): {}  [Enter save / Esc cancel]", clean(s)),
         Mode::Confirm(p) => format!("Pull {} [{}] {} -> {} ({} commits)? y / n", clean(&p.repo.path.display().to_string()), clean(&p.before.branch), &p.before.head[..7.min(p.before.head.len())], &p.target[..7.min(p.target.len())], p.before.behind),
         Mode::Checkout(s) => format!("Checkout PR number: {}  [Enter preview / Esc cancel]", clean(s)),
         Mode::ConfirmCheckout(p) => format!("Checkout PR #{} as {} in {}? y / n", p.number, clean(&p.branch), clean(&p.repo.path.display().to_string())),
         Mode::Remove(name) => format!("Remove {} from registry only? y / n", clean(name)),
-        Mode::Help => "j/k move | 1-6 tabs | PgUp/PgDn scroll | a add | d remove | c checkout PR | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
+        Mode::Help => "j/k move | 1-6 tabs | PgUp/PgDn scroll | a add | d remove | w workspace | n new | m/u membership | t terminal | c checkout PR | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
         Mode::Normal if app.action_busy => format!("{} action running... monitoring remains available", spinner_frame(animation_frame())),
-        Mode::Normal => "a add  d remove  c checkout PR  / filter  1-6 details  r refresh  p pull  o browser  ? help  q quit".into(),
+        Mode::Normal => "? help  w workspace  n new  m/u membership  t terminal  a add  d remove  c checkout  / filter  r refresh  p pull  o browser  q quit".into(),
     };
     let mut footer = vec![Line::from(vec![
         Span::styled(

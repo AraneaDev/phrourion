@@ -19,6 +19,7 @@ fn test_repo(project: &str) -> Repo {
         release_workflows: vec![],
         release_labels: vec![],
         issue_labels: vec![],
+        workspaces: vec![],
     }
 }
 

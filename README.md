@@ -91,7 +91,9 @@ on Linux, `osascript` on macOS) once for that transition, not on every refresh.
 The dashboard is read-only until you choose an action. It can refresh local and
 remote state, open a repository in the browser, add or remove a checkout, pull
 the selected repository after confirmation, and check out a pull request's
-branch by number.
+branch by number. Press `t` on a selected repository to open a new terminal in
+that checkout's folder. Phrourion prefers `$TERMINAL`, then detects `foot`,
+`kitty`, `alacritty`, `wezterm`, or `gnome-terminal`.
 
 A pull is allowed only when the checkout is still the registered one, the branch
 is attached and unchanged, the working tree is clean, the upstream is configured,
@@ -112,6 +114,25 @@ d       remove a repository
 ?       show help
 q       quit
 ```
+
+Named workspaces group repositories without moving or duplicating checkout
+registrations. A repository can belong to multiple workspaces, and `All` is
+always available:
+
+```bash
+phro workspace create AraneaDev
+phro workspace add AraneaDev phrourion alpheus
+phro workspace list
+phro workspace repos AraneaDev
+phro workspace remove AraneaDev alpheus
+phro workspace delete AraneaDev
+phro status --workspace AraneaDev
+phro open-terminal phrourion
+```
+
+`phro list` includes workspace memberships. Workspace changes are stored in the
+user registry alongside repository entries; deleting a workspace never deletes
+a checkout.
 
 ## Install
 
