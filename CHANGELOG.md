@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/AraneaDev/phrourion/compare/v0.3.2...v0.3.3) (2026-09-18)
+
+
+### Bug Fixes
+
+* respect user-defined workspace catalogs ([#22](https://github.com/AraneaDev/phrourion/issues/22)) ([0e2cf8a](https://github.com/AraneaDev/phrourion/commit/0e2cf8a4ad86159236b1b95783e284029ac549e8))
+
 ## [0.3.2](https://github.com/AraneaDev/phrourion/compare/v0.3.1...v0.3.2) (2026-09-17)
 
 
