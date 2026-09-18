@@ -25,14 +25,17 @@ implementation, assign all 13 currently registered repositories to the
 
 ## Data model and compatibility
 
-Add a defaulted `workspaces: Vec<String>` field to `Repo`. Old TOML registries
-without this field deserialize with no memberships. Add a registry-level
-optional active-workspace preference, stored alongside the repository list.
+Add a defaulted `workspaces: Vec<String>` field to `Repo`, plus a defaulted
+registry-level `workspaces: Vec<String>` catalog and optional active-workspace
+preference. Old TOML registries without these fields deserialize with no
+memberships and no named workspaces. The catalog allows an empty workspace to
+exist while memberships remain simple labels on each repository.
 
 Workspace names are trimmed, non-empty, case-preserving display values. Name
-comparisons are case-insensitive so duplicate labels cannot be created. Adding
-an existing membership is idempotent. Removing a missing membership is also
-idempotent where the requested workspace and repository are otherwise valid.
+comparisons are case-insensitive so duplicate labels cannot be created. The
+catalog is sorted deterministically. Adding an existing membership is
+idempotent. Removing a missing membership is also idempotent where the
+requested workspace and repository are otherwise valid.
 
 The existing locked, atomic registry update path remains the only write path.
 Deleting a workspace removes its memberships from repositories but never
@@ -41,8 +44,9 @@ deletes repositories or checkout files. The post-implementation migration adds
 
 ## Registry API
 
-The registry module owns workspace discovery and mutation so CLI and TUI share
-validation and behavior. It should provide operations equivalent to:
+The registry module owns the workspace catalog, membership mutation, and
+filtering so CLI and TUI share validation and behavior. It should provide
+operations equivalent to:
 
 - list known workspace names;
 - create and delete a workspace;
@@ -52,7 +56,8 @@ validation and behavior. It should provide operations equivalent to:
 
 Operations must reject empty names, the reserved `All` name, unknown
 workspaces where membership is being changed, unknown repositories, and
-ambiguous repository selectors before writing. Workspace and repository lists
+ambiguous repository selectors before writing. Deleting a workspace removes
+the catalog entry and all matching memberships. Workspace and repository lists
 remain deterministic and human-readable in TOML.
 
 ## CLI
