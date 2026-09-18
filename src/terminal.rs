@@ -16,7 +16,10 @@ pub fn command_for(path: &Path, terminal: &str) -> Result<(String, Vec<String>)>
         bail!("{} is not a directory", path.display());
     }
 
-    let directory = path.to_string_lossy().into_owned();
+    let directory = path
+        .to_str()
+        .context("Repository path is not valid UTF-8")?
+        .to_owned();
     let args = match terminal_name(terminal) {
         "foot" | "alacritty" => vec!["--working-directory".into(), directory],
         "kitty" => vec!["--directory".into(), directory],
@@ -62,7 +65,14 @@ fn executable_exists(program: &str) -> bool {
 fn selected_terminal() -> Result<String> {
     if let Ok(terminal) = std::env::var("TERMINAL") {
         if SUPPORTED_TERMINALS.contains(&terminal_name(&terminal)) && executable_exists(&terminal) {
-            return Ok(terminal);
+            return Ok(if Path::new(&terminal).components().count() > 1 {
+                std::fs::canonicalize(&terminal)
+                    .with_context(|| format!("Cannot resolve terminal {terminal}"))?
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                terminal
+            });
         }
     }
 
@@ -93,7 +103,14 @@ pub async fn open(path: &Path) -> Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
+        unsafe {
+            command.as_std_mut().pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     command
         .spawn()
