@@ -113,6 +113,27 @@ pub(super) fn remote_backoff(failures: u32) -> Duration {
     Duration::from_secs(60 * 2_u64.pow(failures))
 }
 
+fn reload_registry(app: &mut App, data: registry::Registry) {
+    let fresh = App::with_registry(data);
+    app.workspaces = fresh.workspaces;
+    app.active_workspace = fresh.active_workspace;
+    let new_rows = fresh.rows;
+    app.update_rows(|rows| {
+        let old: HashMap<_, _> = rows.drain(..).map(|r| (r.repo.id.clone(), r)).collect();
+        *rows = new_rows
+            .into_iter()
+            .map(|row| {
+                if let Some(previous) = old.get(&row.repo.id) {
+                    let mut restored = previous.clone();
+                    restored.repo = row.repo;
+                    return restored;
+                }
+                row
+            })
+            .collect();
+    });
+}
+
 pub(super) async fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
@@ -228,17 +249,7 @@ pub(super) async fn event_loop(
                     app.action_busy = false;
                     match result {
                         Ok(()) => {
-                            let mut fresh = App::new(registry::load(config)?.repos);
-                            app.update_rows(|rows| {
-                                let old: HashMap<_, _> =
-                                    rows.drain(..).map(|r| (r.repo.id.clone(), r)).collect();
-                                for row in &mut fresh.rows {
-                                    if let Some(previous) = old.get(&row.repo.id) {
-                                        *row = previous.clone();
-                                    }
-                                }
-                                *rows = fresh.rows;
-                            });
+                            reload_registry(app, registry::load(config)?);
                             app.record("Registry updated");
                         }
                         Err(e) => app.record(e),
@@ -299,6 +310,95 @@ pub(super) async fn event_loop(
                     KeyCode::Char(c) => {
                         app.filter.push(c);
                         app.selected = 0;
+                    }
+                    _ => {}
+                },
+                Mode::Workspace(input) => match key.code {
+                    KeyCode::Esc => app.mode = Mode::Normal,
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char(c) => input.push(c),
+                    KeyCode::Enter => {
+                        let name = input.trim().to_string();
+                        let result = if name.eq_ignore_ascii_case("All") || name.is_empty() {
+                            registry::set_active_workspace(config, None)
+                        } else if app
+                            .workspaces
+                            .iter()
+                            .any(|workspace| workspace.eq_ignore_ascii_case(&name))
+                        {
+                            registry::set_active_workspace(config, Some(&name))
+                        } else {
+                            anyhow::bail!("Unknown workspace: {name}")
+                        };
+                        match result {
+                            Ok(()) => {
+                                app.active_workspace =
+                                    if name.is_empty() || name.eq_ignore_ascii_case("All") {
+                                        None
+                                    } else {
+                                        Some(name)
+                                    };
+                                app.selected = 0;
+                            }
+                            Err(e) => app.record(e),
+                        }
+                        app.mode = Mode::Normal;
+                    }
+                    _ => {}
+                },
+                Mode::CreateWorkspace(input) => match key.code {
+                    KeyCode::Esc => app.mode = Mode::Normal,
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char(c) => input.push(c),
+                    KeyCode::Enter => {
+                        let name = input.trim().to_string();
+                        match registry::create_workspace(config, &name)
+                            .and_then(|_| registry::set_active_workspace(config, Some(&name)))
+                            .and_then(|_| registry::load(config))
+                        {
+                            Ok(data) => {
+                                reload_registry(app, data);
+                                app.record(format!("Created workspace {name}"));
+                            }
+                            Err(e) => app.record(e),
+                        }
+                        app.mode = Mode::Normal;
+                    }
+                    _ => {}
+                },
+                Mode::AddWorkspace(input) | Mode::RemoveWorkspace(input) => match key.code {
+                    KeyCode::Esc => app.mode = Mode::Normal,
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char(c) => input.push(c),
+                    KeyCode::Enter => {
+                        let workspace = if input.trim().is_empty() {
+                            app.active_workspace.clone()
+                        } else {
+                            Some(input.trim().to_string())
+                        };
+                        let result = match (workspace, app.current()) {
+                            (Some(workspace), Some(index)) => {
+                                let repo = app.rows[index].repo.id.clone();
+                                if matches!(&app.mode, Mode::AddWorkspace(_)) {
+                                    registry::add_to_workspace(config, &workspace, &repo)
+                                } else {
+                                    registry::remove_from_workspace(config, &workspace, &repo)
+                                }
+                            }
+                            (None, _) => anyhow::bail!("Select a workspace first"),
+                            (_, None) => anyhow::bail!("No repository selected"),
+                        };
+                        match result.and_then(|_| registry::load(config)) {
+                            Ok(data) => reload_registry(app, data),
+                            Err(e) => app.record(e),
+                        }
+                        app.mode = Mode::Normal;
                     }
                     _ => {}
                 },
@@ -385,6 +485,16 @@ pub(super) async fn event_loop(
                     }
                     KeyCode::Char('/') => app.mode = Mode::Filter,
                     KeyCode::Char('?') => app.mode = Mode::Help,
+                    KeyCode::Char('w') => app.mode = Mode::Workspace(String::new()),
+                    KeyCode::Char('n') if !app.action_busy => {
+                        app.mode = Mode::CreateWorkspace(String::new())
+                    }
+                    KeyCode::Char('m') if !app.action_busy => {
+                        app.mode = Mode::AddWorkspace(String::new())
+                    }
+                    KeyCode::Char('u') if !app.action_busy => {
+                        app.mode = Mode::RemoveWorkspace(String::new())
+                    }
                     KeyCode::Char('a') if !app.action_busy => app.mode = Mode::Add(String::new()),
                     KeyCode::Char('d') if !app.action_busy => {
                         if let Some(i) = app.current() {
@@ -462,6 +572,17 @@ pub(super) async fn event_loop(
                                     .await
                                     .map(|_| format!("Opened {url}"));
                                 let _ = tx.send(Message::Action(result));
+                            });
+                        }
+                    }
+                    KeyCode::Char('t') if !app.action_busy => {
+                        if let Some(i) = app.current() {
+                            let path = app.rows[i].repo.path.clone();
+                            let tx = tx.clone();
+                            app.action_busy = true;
+                            tasks.spawn(async move {
+                                let _ =
+                                    tx.send(Message::Action(crate::terminal::open(&path).await));
                             });
                         }
                     }

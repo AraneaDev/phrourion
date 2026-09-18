@@ -2,6 +2,7 @@ use super::cache::cached;
 use crate::{
     git::{CheckoutPreview, LocalState, PullPreview},
     model::{Observation, RemoteState, Repo, clean},
+    registry::Registry,
 };
 use std::time::Instant;
 
@@ -101,6 +102,10 @@ pub(super) enum Mode {
     ConfirmCheckout(Box<CheckoutPreview>),
     Remove(String),
     Help,
+    Workspace(String),
+    CreateWorkspace(String),
+    AddWorkspace(String),
+    RemoveWorkspace(String),
 }
 
 pub struct App {
@@ -110,14 +115,29 @@ pub struct App {
     pub tab: usize,
     pub scroll: u16,
     pub log: Vec<String>,
+    pub workspaces: Vec<String>,
+    pub active_workspace: Option<String>,
     pub(super) mode: Mode,
     pub(super) action_busy: bool,
 }
 
 impl App {
     pub fn new(repos: Vec<Repo>) -> Self {
+        Self::with_registry(Registry {
+            repos,
+            ..Registry::default()
+        })
+    }
+
+    pub fn with_registry(data: Registry) -> Self {
+        let active_workspace = data.active_workspace.filter(|active| {
+            data.workspaces
+                .iter()
+                .any(|workspace| workspace.eq_ignore_ascii_case(active))
+        });
         Self {
-            rows: repos
+            rows: data
+                .repos
                 .into_iter()
                 .filter(|r| r.enabled)
                 .map(|repo| RowState {
@@ -136,6 +156,8 @@ impl App {
             tab: 0,
             scroll: 0,
             log: Vec::new(),
+            workspaces: data.workspaces,
+            active_workspace,
             mode: Mode::Normal,
             action_busy: false,
         }
@@ -147,9 +169,16 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                format!("{} {}", r.repo.name, r.repo.path.display())
-                    .to_lowercase()
-                    .contains(&query)
+                let in_workspace = self.active_workspace.as_deref().is_none_or(|workspace| {
+                    r.repo
+                        .workspaces
+                        .iter()
+                        .any(|membership| membership.eq_ignore_ascii_case(workspace))
+                });
+                in_workspace
+                    && format!("{} {}", r.repo.name, r.repo.path.display())
+                        .to_lowercase()
+                        .contains(&query)
             })
             .map(|(i, _)| i)
             .collect();

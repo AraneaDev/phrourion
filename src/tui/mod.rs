@@ -12,7 +12,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 pub async fn run(config: PathBuf) -> Result<()> {
-    let mut app = App::new(registry::load(&config)?.repos);
+    let mut app = App::with_registry(registry::load(&config)?);
     let mut terminal = ratatui::init();
     let result = async {
         animation::startup_screen(&mut terminal).await?;
@@ -46,6 +46,7 @@ mod tests {
     use crate::{
         git::LocalState,
         model::{Observation, RemoteState, Repo},
+        registry::Registry,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::style::Color;
@@ -169,6 +170,27 @@ mod tests {
         );
         app.filter = "incoming".into();
         assert_eq!(app.visible(), [3]);
+    }
+
+    #[test]
+    fn workspace_view_filters_rows_and_all_restores_them() {
+        let mut alpha = test_row(LocalState::default()).repo;
+        alpha.id = "alpha".into();
+        alpha.name = "alpha".into();
+        alpha.workspaces = vec!["AraneaDev".into()];
+        let mut beta = test_row(LocalState::default()).repo;
+        beta.id = "beta".into();
+        beta.name = "beta".into();
+        beta.workspaces = vec!["Other".into()];
+        let mut app = App::with_registry(Registry {
+            repos: vec![alpha, beta],
+            workspaces: vec!["AraneaDev".into(), "Other".into()],
+            active_workspace: Some("AraneaDev".into()),
+        });
+
+        assert_eq!(app.visible().len(), 1);
+        app.active_workspace = None;
+        assert_eq!(app.visible().len(), 2);
     }
 
     #[test]
