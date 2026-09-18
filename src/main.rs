@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use phrourion::{git, model::ProviderKind, provider, registry, tui};
+use phrourion::{git, model::ProviderKind, provider, registry, terminal, tui};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -61,7 +61,52 @@ enum Action {
     Status {
         #[arg(long)]
         remote: bool,
+        #[arg(long)]
+        workspace: Option<String>,
     },
+    /// Manage named repository workspaces.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceAction,
+    },
+    /// Open a registered repository in a new terminal.
+    OpenTerminal { name: String },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceAction {
+    /// Show all named workspaces.
+    List,
+    /// Create an empty workspace.
+    Create { name: String },
+    /// Delete a workspace and its memberships.
+    Delete { name: String },
+    /// Add one or more repositories to a workspace.
+    Add { name: String, repos: Vec<String> },
+    /// Remove one or more repositories from a workspace.
+    Remove { name: String, repos: Vec<String> },
+    /// Show repositories in a workspace.
+    Repos { name: String },
+}
+
+fn selected_workspace<'a>(data: &'a registry::Registry, name: &'a str) -> Result<Option<&'a str>> {
+    if name.eq_ignore_ascii_case("All") {
+        return Ok(None);
+    }
+    data.workspaces
+        .iter()
+        .find(|workspace| workspace.eq_ignore_ascii_case(name))
+        .map(String::as_str)
+        .map(Some)
+        .ok_or_else(|| anyhow::anyhow!("Unknown workspace: {name}"))
+}
+
+fn repo_workspace_labels(repo: &phrourion::model::Repo) -> String {
+    if repo.workspaces.is_empty() {
+        "-".into()
+    } else {
+        repo.workspaces.join(",")
+    }
 }
 
 #[tokio::main]
@@ -88,7 +133,13 @@ async fn main() -> Result<()> {
         }
         Some(Action::List) => {
             for repo in registry::load(&config)?.repos {
-                println!("{}\t{}\t{}", repo.name, repo.path.display(), repo.remote);
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    repo.name,
+                    repo.path.display(),
+                    repo.remote,
+                    repo_workspace_labels(&repo)
+                );
             }
         }
         Some(Action::Discover { path, add }) => {
@@ -120,10 +171,15 @@ async fn main() -> Result<()> {
                 bail!("{}", errors.join("\n"));
             }
         }
-        Some(Action::Status { remote }) => {
+        Some(Action::Status { remote, workspace }) => {
+            let data = registry::load(&config)?;
+            let workspace = workspace
+                .as_deref()
+                .map(|name| selected_workspace(&data, name))
+                .transpose()?
+                .flatten();
             let mut states = Vec::new();
-            for repo in registry::load(&config)?
-                .repos
+            for repo in registry::repos_in_workspace(&data, workspace)
                 .into_iter()
                 .filter(|r| r.enabled)
             {
@@ -139,6 +195,60 @@ async fn main() -> Result<()> {
                 states.push(serde_json::json!({"repo":repo,"local":local,"remote":remote_state}));
             }
             println!("{}", serde_json::to_string_pretty(&states)?);
+        }
+        Some(Action::Workspace { command }) => match command {
+            WorkspaceAction::List => {
+                for workspace in registry::workspace_names(&registry::load(&config)?) {
+                    println!("{workspace}");
+                }
+            }
+            WorkspaceAction::Create { name } => {
+                registry::create_workspace(&config, &name)?;
+                println!("Created workspace {name}");
+            }
+            WorkspaceAction::Delete { name } => {
+                registry::delete_workspace(&config, &name)?;
+                println!("Deleted workspace {name}");
+            }
+            WorkspaceAction::Add { name, repos } => {
+                if repos.is_empty() {
+                    bail!("At least one repository is required");
+                }
+                for repo in repos {
+                    registry::add_to_workspace(&config, &name, &repo)?;
+                    println!("Added {repo} to {name}");
+                }
+            }
+            WorkspaceAction::Remove { name, repos } => {
+                if repos.is_empty() {
+                    bail!("At least one repository is required");
+                }
+                for repo in repos {
+                    registry::remove_from_workspace(&config, &name, &repo)?;
+                    println!("Removed {repo} from {name}");
+                }
+            }
+            WorkspaceAction::Repos { name } => {
+                let data = registry::load(&config)?;
+                let workspace = selected_workspace(&data, &name)?;
+                for repo in registry::repos_in_workspace(&data, workspace) {
+                    println!("{}\t{}", repo.name, repo.path.display());
+                }
+            }
+        },
+        Some(Action::OpenTerminal { name }) => {
+            let data = registry::load(&config)?;
+            let matches: Vec<_> = data
+                .repos
+                .iter()
+                .filter(|repo| repo.id == name || repo.name == name)
+                .collect();
+            let repo = match matches.as_slice() {
+                [repo] => repo,
+                [] => bail!("Unknown repository: {name}"),
+                _ => bail!("Expected one matching repository; use its full ID"),
+            };
+            println!("{}", terminal::open(&repo.path).await?);
         }
     }
     Ok(())
