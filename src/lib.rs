@@ -4,6 +4,7 @@ pub mod git;
 pub mod model;
 pub mod provider;
 pub mod registry;
+pub mod terminal;
 pub mod tui;
 
 #[cfg(test)]
