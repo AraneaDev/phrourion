@@ -3,6 +3,8 @@ pub mod forgejo;
 pub mod git;
 pub mod model;
 pub mod provider;
+#[allow(dead_code)]
+pub(crate) mod provider_http;
 pub mod registry;
 pub mod terminal;
 pub mod tui;
