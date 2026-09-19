@@ -171,7 +171,7 @@ impl App {
             action_busy: false,
         }
     }
-    pub(super) fn open_help(&mut self) {
+    pub fn open_help(&mut self) {
         if matches!(self.mode, Mode::Help { .. }) {
             return;
         }

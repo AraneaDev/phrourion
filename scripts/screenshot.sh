@@ -3,8 +3,9 @@ set -euo pipefail
 
 config=${1-}
 output=${2-docs/screenshots/dashboard.svg}
+mode=${3-dashboard}
 
-args=(--bin phro-screenshot -- "$config" "$output")
+args=(--bin phro-screenshot -- "$config" "$output" "$mode")
 if [[ -n ${PHROURION_SCREENSHOT_LIVE-} ]]; then
   cargo run --quiet "${args[@]}"
 else

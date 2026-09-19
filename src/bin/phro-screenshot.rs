@@ -7,6 +7,37 @@ use phrourion::{
 use ratatui::{Terminal, backend::TestBackend, buffer::Cell, style::Color};
 use std::{env, fs, path::PathBuf};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScreenshotMode {
+    Dashboard,
+    Help,
+}
+
+impl ScreenshotMode {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "dashboard" => Ok(Self::Dashboard),
+            "help" => Ok(Self::Help),
+            other => anyhow::bail!("unknown screenshot mode: {other}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScreenshotMode;
+
+    #[test]
+    fn screenshot_mode_accepts_dashboard_and_help() {
+        assert_eq!(
+            ScreenshotMode::parse("dashboard").unwrap(),
+            ScreenshotMode::Dashboard
+        );
+        assert_eq!(ScreenshotMode::parse("help").unwrap(), ScreenshotMode::Help);
+        assert!(ScreenshotMode::parse("unknown").is_err());
+    }
+}
+
 fn color(value: Color) -> &'static str {
     match value {
         Color::Reset | Color::White => "#d8dee9",
@@ -48,7 +79,11 @@ async fn main() -> Result<()> {
         .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("docs/screenshots/dashboard.svg"));
+    let mode = ScreenshotMode::parse(args.next().as_deref().unwrap_or("dashboard"))?;
     let mut app = tui::App::with_registry(registry::load(&config)?);
+    if mode == ScreenshotMode::Help {
+        app.open_help();
+    }
     if env::var_os("PHROURION_SCREENSHOT_LIVE").is_some() {
         for row in &mut app.rows {
             row.local = match git::snapshot(&row.repo).await {
