@@ -114,7 +114,7 @@ const REPOSITORY_ACTIONS: &[Binding] = &[
         "r refresh",
     ),
     available_when("o", "open remote page", Availability::Selection),
-    available_when("t", "open terminal", Availability::Selection),
+    available_when("t", "open terminal", Availability::IdleSelection),
     compact("/", "filter repositories", 2, "/ filter"),
 ];
 

@@ -370,9 +370,10 @@ fn help_lines(groups: &[keys::BindingGroup], app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn draw_help_modal(frame: &mut Frame, app: &App) {
-    let Mode::Help { scroll, .. } = &app.mode else {
-        return;
+fn draw_help_modal(frame: &mut Frame, app: &mut App) {
+    let requested_scroll = match &app.mode {
+        Mode::Help { scroll, .. } => *scroll,
+        _ => return,
     };
     let two_columns = frame.area().width >= HELP_TWO_COLUMN_MIN_WIDTH;
     let groups = keys::catalog();
@@ -402,7 +403,10 @@ fn draw_help_modal(frame: &mut Frame, app: &App) {
     let controls_height = if overflow { 2 } else { 1 }.min(inner.height);
     let body_height = inner.height.saturating_sub(controls_height);
     let max_scroll = content_height.saturating_sub(body_height);
-    let scroll = (*scroll).min(max_scroll);
+    let scroll = requested_scroll.min(max_scroll);
+    if let Mode::Help { scroll: stored, .. } = &mut app.mode {
+        *stored = scroll;
+    }
     let vertical = Layout::vertical([
         Constraint::Length(body_height),
         Constraint::Length(controls_height),
@@ -438,7 +442,7 @@ fn draw_help_modal(frame: &mut Frame, app: &App) {
     );
 }
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let areas = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(3),

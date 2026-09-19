@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
     }
     let backend = TestBackend::new(140, 42);
     let mut terminal = Terminal::new(backend)?;
-    terminal.draw(|frame| tui::draw(frame, &app))?;
+    terminal.draw(|frame| tui::draw(frame, &mut app))?;
     let buffer = terminal.backend().buffer();
     let width = buffer.area.width as usize * 8;
     let height = buffer.area.height as usize * 16;
