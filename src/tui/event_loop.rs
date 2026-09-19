@@ -222,7 +222,7 @@ pub(super) fn apply_preview_message(app: &mut App, message: Message) {
 
 fn present_preview(app: &mut App, preview: PendingPreview) {
     if let Mode::Help { pending, .. } = &mut app.mode {
-        *pending = Some(preview);
+        **pending = Some(preview);
         return;
     }
     app.mode = match preview {

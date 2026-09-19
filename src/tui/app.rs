@@ -104,7 +104,7 @@ pub(super) enum Mode {
     Help {
         previous: Box<Mode>,
         scroll: u16,
-        pending: Option<PendingPreview>,
+        pending: Box<Option<PendingPreview>>,
     },
     Workspace(String),
     CreateWorkspace(String),
@@ -179,7 +179,7 @@ impl App {
         self.mode = Mode::Help {
             previous: Box::new(previous),
             scroll: 0,
-            pending: None,
+            pending: Box::new(None),
         };
     }
     pub(super) fn close_help(&mut self) {
@@ -187,7 +187,7 @@ impl App {
         self.mode = match mode {
             Mode::Help {
                 previous, pending, ..
-            } => match pending {
+            } => match *pending {
                 Some(PendingPreview::Pull(preview)) => Mode::Confirm(Box::new(preview)),
                 Some(PendingPreview::Checkout(preview)) => Mode::ConfirmCheckout(Box::new(preview)),
                 None => *previous,

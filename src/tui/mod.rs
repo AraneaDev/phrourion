@@ -245,9 +245,10 @@ mod tests {
             app.mode,
             app::Mode::Help {
                 ref previous,
-                pending: Some(_),
+                ref pending,
                 ..
-            } if matches!(previous.as_ref(), app::Mode::Add(input) if input == "partially typed")
+            } if pending.as_ref().is_some()
+                && matches!(previous.as_ref(), app::Mode::Add(input) if input == "partially typed")
         ));
         assert_eq!(
             dispatch_for(
@@ -277,9 +278,9 @@ mod tests {
         assert!(matches!(
             app.mode,
             app::Mode::Help {
-                pending: Some(_),
+                ref pending,
                 ..
-            }
+            } if pending.as_ref().is_some()
         ));
         app.close_help();
         assert!(matches!(

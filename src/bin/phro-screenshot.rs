@@ -23,21 +23,6 @@ impl ScreenshotMode {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ScreenshotMode;
-
-    #[test]
-    fn screenshot_mode_accepts_dashboard_and_help() {
-        assert_eq!(
-            ScreenshotMode::parse("dashboard").unwrap(),
-            ScreenshotMode::Dashboard
-        );
-        assert_eq!(ScreenshotMode::parse("help").unwrap(), ScreenshotMode::Help);
-        assert!(ScreenshotMode::parse("unknown").is_err());
-    }
-}
-
 fn color(value: Color) -> &'static str {
     match value {
         Color::Reset | Color::White => "#d8dee9",
@@ -133,4 +118,19 @@ async fn main() -> Result<()> {
     fs::write(&output, svg).with_context(|| format!("Cannot write {}", output.display()))?;
     println!("Wrote {}", output.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScreenshotMode;
+
+    #[test]
+    fn screenshot_mode_accepts_dashboard_and_help() {
+        assert_eq!(
+            ScreenshotMode::parse("dashboard").unwrap(),
+            ScreenshotMode::Dashboard
+        );
+        assert_eq!(ScreenshotMode::parse("help").unwrap(), ScreenshotMode::Help);
+        assert!(ScreenshotMode::parse("unknown").is_err());
+    }
 }
