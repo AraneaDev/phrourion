@@ -1422,6 +1422,19 @@ mod tests {
     }
 
     #[test]
+    fn help_modal_narrow_scroll_reaches_the_final_wrapped_description() {
+        let mut app = test_app_in_help_mode();
+        let app::Mode::Help { scroll, .. } = &mut app.mode else {
+            panic!("test app should be in help mode");
+        };
+        *scroll = u16::MAX;
+
+        let buffer = render_app(&mut app, 20, 12);
+
+        assert!(buffer_contains(&buffer, "page"));
+    }
+
+    #[test]
     fn help_modal_scrolls_rows_but_keeps_controls_visible() {
         let mut app = test_app_in_help_mode();
         let at_top = render_app(&mut app, 48, 14);

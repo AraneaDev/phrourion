@@ -374,13 +374,9 @@ fn help_lines(groups: &[keys::BindingGroup], app: &App, stack_rows: bool) -> Vec
 }
 
 fn wrapped_line_count(lines: &[Line<'static>], width: u16) -> u16 {
-    if width == 0 {
-        return 0;
-    }
-    lines
-        .iter()
-        .map(|line| line.width().div_ceil(width as usize).max(1))
-        .sum::<usize>() as u16
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width) as u16
 }
 
 fn draw_help_modal(frame: &mut Frame, app: &mut App) {
