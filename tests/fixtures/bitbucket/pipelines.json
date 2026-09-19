@@ -1,0 +1,28 @@
+{
+  "pagelen": 1,
+  "page": 1,
+  "size": 1,
+  "values": [
+    {
+      "uuid": "{99999999-8888-7777-6666-555555555555}",
+      "build_number": 44,
+      "state": {
+        "name": "COMPLETED",
+        "result": {
+          "name": "SUCCESSFUL"
+        }
+      },
+      "target": {
+        "ref_name": "main",
+        "commit": {
+          "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "links": {
+        "html": {
+          "href": "https://bitbucket.example/acme/widgets/pipelines/results/44"
+        }
+      }
+    }
+  ]
+}

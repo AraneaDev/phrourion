@@ -1,0 +1,19 @@
+{
+  "pagelen": 1,
+  "page": 1,
+  "size": 1,
+  "values": [
+    {
+      "id": 12,
+      "title": "Widget alignment is incorrect",
+      "state": "new",
+      "kind": "bug",
+      "priority": "major",
+      "links": {
+        "html": {
+          "href": "https://bitbucket.example/acme/widgets/issues/12"
+        }
+      }
+    }
+  ]
+}

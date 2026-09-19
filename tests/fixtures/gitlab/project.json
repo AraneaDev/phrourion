@@ -1,0 +1,6 @@
+{
+  "id": 42,
+  "path_with_namespace": "acme/widgets",
+  "default_branch": "main",
+  "web_url": "https://gitlab.example/acme/widgets"
+}

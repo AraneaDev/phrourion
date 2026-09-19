@@ -1,0 +1,10 @@
+[
+  {
+    "id": 301,
+    "iid": 44,
+    "status": "success",
+    "ref": "main",
+    "sha": "1111111111111111111111111111111111111111",
+    "web_url": "https://gitlab.example/acme/widgets/-/pipelines/301"
+  }
+]

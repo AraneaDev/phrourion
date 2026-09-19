@@ -1,0 +1,39 @@
+{
+  "pagelen": 2,
+  "page": 1,
+  "size": 2,
+  "values": [
+    {
+      "name": "main",
+      "target": {
+        "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "links": {
+          "html": {
+            "href": "https://bitbucket.example/acme/widgets/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      },
+      "links": {
+        "html": {
+          "href": "https://bitbucket.example/acme/widgets/branch/main"
+        }
+      }
+    },
+    {
+      "name": "feature/widget",
+      "target": {
+        "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "links": {
+          "html": {
+            "href": "https://bitbucket.example/acme/widgets/commits/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      },
+      "links": {
+        "html": {
+          "href": "https://bitbucket.example/acme/widgets/branch/feature/widget"
+        }
+      }
+    }
+  ]
+}

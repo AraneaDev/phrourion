@@ -307,10 +307,6 @@ impl RemoteProvider for Forgejo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        collections::VecDeque,
-        sync::{Arc, Mutex},
-    };
 
     // Rust's test harness runs #[test]/#[tokio::test] fns concurrently on
     // separate threads by default, but PHROURION_FORGEJO_TEST_URL and any
@@ -319,7 +315,9 @@ mod tests {
     // two such tests interleave (mirrors tests/forgejo_workflow.rs's
     // LIVE_TEST_LOCK for the same reason). Shared with src/provider.rs's
     // tests, which also set PHROURION_FORGEJO_TEST_URL.
-    use crate::test_support::{FORGEJO_ENV_LOCK as ENV_LOCK, response, test_server};
+    use crate::test_support::{
+        FORGEJO_ENV_LOCK as ENV_LOCK, MockServer, TestServer, mock_server, response, test_server,
+    };
 
     struct MockResponse {
         status: u16,
@@ -328,25 +326,14 @@ mod tests {
 
     // Queues provider-specific responses while the provider-neutral request
     // parser and TCP server live in crate::test_support.
-    async fn serve_mock(
-        responses: Vec<MockResponse>,
-    ) -> (String, std::sync::mpsc::Receiver<(String, Option<String>)>) {
-        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
-        let (tx, rx) = std::sync::mpsc::channel();
-        let server = test_server(move |request| {
-            let _ = tx.send((
-                request.path().to_string(),
-                request.header("authorization").map(str::to_string),
-            ));
-            let mock_response = responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("mock response queue exhausted");
-            response(mock_response.status, &mock_response.body)
-        })
-        .await;
-        (server.url().to_string(), rx)
+    async fn serve_mock(responses: Vec<MockResponse>) -> MockServer {
+        mock_server(
+            responses
+                .into_iter()
+                .map(|response_| response(response_.status, &response_.body))
+                .collect(),
+        )
+        .await
     }
 
     // Like serve_mock, but for callers that fire several requests
@@ -354,12 +341,10 @@ mod tests {
     // fresh thread per accepted connection and routes each one by matching
     // `pattern` against the request's first line (method + path + query),
     // so response order doesn't need to match request order. Any path that
-    // matches no route gets `[]` (a harmless empty page/object). Runs for
-    // the rest of the process, so no response count needs to be known
-    // upfront.
-    async fn serve_routed_mock(routes: Vec<(&'static str, String)>) -> String {
-        let routes = Arc::new(routes);
-        let server = test_server(move |request| {
+    // matches no route gets `[]` (a harmless empty page/object). The owned
+    // server handle keeps it alive for exactly the calling test's scope.
+    async fn serve_routed_mock(routes: Vec<(&'static str, String)>) -> TestServer {
+        test_server(move |request| {
             let body = routes
                 .iter()
                 .find(|(pattern, _)| request.path().contains(pattern))
@@ -367,8 +352,7 @@ mod tests {
                 .unwrap_or("[]");
             response(200, body)
         })
-        .await;
-        server.url().to_string()
+        .await
     }
 
     // Caller must hold ENV_LOCK for the duration of this call. Awaits `fut`
@@ -409,12 +393,12 @@ mod tests {
     #[tokio::test]
     async fn get_returns_parsed_json_on_success_via_a_local_mock_server() {
         let _guard = ENV_LOCK.lock().await;
-        let (base, _rx) = serve_mock(vec![MockResponse {
+        let server = serve_mock(vec![MockResponse {
             status: 200,
             body: r#"{"hello":"world"}"#.into(),
         }])
         .await;
-        let value = with_test_url(&base, get("mock", "anything", &[]))
+        let value = with_test_url(server.root_url(), get("mock", "anything", &[]))
             .await
             .expect("mock server returned 200 with valid JSON");
         assert_eq!(value["hello"], "world");
@@ -423,12 +407,12 @@ mod tests {
     #[tokio::test]
     async fn paginated_collects_a_single_short_page_via_a_local_mock_server() {
         let _guard = ENV_LOCK.lock().await;
-        let (base, _rx) = serve_mock(vec![MockResponse {
+        let server = serve_mock(vec![MockResponse {
             status: 200,
             body: r#"[{"id":1},{"id":2}]"#.into(),
         }])
         .await;
-        let rows = with_test_url(&base, paginated("mock", "items", &[]))
+        let rows = with_test_url(server.root_url(), paginated("mock", "items", &[]))
             .await
             .expect("page should parse")
             .expect("feature is not reported disabled");
@@ -440,12 +424,16 @@ mod tests {
     #[tokio::test]
     async fn paginated_returns_none_when_the_first_page_404s() {
         let _guard = ENV_LOCK.lock().await;
-        let (base, _rx) = serve_mock(vec![MockResponse {
+        let server = serve_mock(vec![MockResponse {
             status: 404,
             body: r#"{"message":"Not Found"}"#.into(),
         }])
         .await;
-        let result = with_test_url(&base, paginated("mock", "disabled-feature", &[])).await;
+        let result = with_test_url(
+            server.root_url(),
+            paginated("mock", "disabled-feature", &[]),
+        )
+        .await;
         assert!(result.unwrap().is_none());
     }
 
@@ -462,7 +450,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        let (base, _rx) = serve_mock(vec![
+        let server = serve_mock(vec![
             MockResponse {
                 status: 200,
                 body: full_page,
@@ -473,7 +461,7 @@ mod tests {
             },
         ])
         .await;
-        let result = with_test_url(&base, paginated("mock", "items", &[])).await;
+        let result = with_test_url(server.root_url(), paginated("mock", "items", &[])).await;
         assert!(
             result.is_err(),
             "a 404 past page 1 should propagate as Err, not Ok(None)"
@@ -490,7 +478,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        let (base, rx) = serve_mock(vec![
+        let server = serve_mock(vec![
             MockResponse {
                 status: 200,
                 body: full_page,
@@ -501,7 +489,7 @@ mod tests {
             },
         ])
         .await;
-        let rows = with_test_url(&base, paginated("mock", "items", &[]))
+        let rows = with_test_url(server.root_url(), paginated("mock", "items", &[]))
             .await
             .expect("both pages should parse")
             .expect("feature is not reported disabled");
@@ -515,8 +503,8 @@ mod tests {
         );
         assert_eq!(rows[50]["id"], 9001);
 
-        let _first_request = rx.recv().unwrap();
-        let second_request = rx.recv().unwrap().0.to_lowercase();
+        let _first_request = server.next_request();
+        let second_request = server.next_request().path().to_lowercase();
         assert!(
             second_request.contains("page=2"),
             "expected the second request to ask for page 2: {second_request}"
@@ -529,7 +517,7 @@ mod tests {
         let host = "mock";
         let var = env_token_var(host);
         let previous_token = std::env::var(&var).ok();
-        let (base, rx) = serve_mock(vec![
+        let server = serve_mock(vec![
             MockResponse {
                 status: 200,
                 body: "{}".into(),
@@ -544,18 +532,24 @@ mod tests {
         unsafe {
             std::env::set_var(&var, "s3cr3t");
         }
-        with_test_url(&base, get(host, "with-token", &[]))
+        with_test_url(server.root_url(), get(host, "with-token", &[]))
             .await
             .unwrap();
-        let with_token = rx.recv().unwrap().1;
+        let with_token = server
+            .next_request()
+            .header("authorization")
+            .map(str::to_string);
 
         unsafe {
             std::env::set_var(&var, "");
         }
-        with_test_url(&base, get(host, "without-token", &[]))
+        with_test_url(server.root_url(), get(host, "without-token", &[]))
             .await
             .unwrap();
-        let without_token = rx.recv().unwrap().1;
+        let without_token = server
+            .next_request()
+            .header("authorization")
+            .map(str::to_string);
 
         unsafe {
             match &previous_token {
@@ -627,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn forgejo_snapshot_splits_releases_into_drafts_and_published() {
         let _guard = ENV_LOCK.lock().await;
-        let base = serve_routed_mock(vec![(
+        let server = serve_routed_mock(vec![(
             "/releases",
             r#"[{"tag_name":"v1-draft","draft":true,"html_url":"u1","published_at":""},{"tag_name":"v2-published","draft":false,"html_url":"u2","published_at":"2024-01-01"}]"#.into(),
         )])
@@ -648,7 +642,7 @@ mod tests {
             issue_labels: vec![],
             workspaces: vec![],
         };
-        let state = with_test_url(&base, Forgejo.snapshot(&repo)).await;
+        let state = with_test_url(server.root_url(), Forgejo.snapshot(&repo)).await;
 
         let drafts = state.drafts.data.expect("drafts should be populated");
         assert_eq!(drafts.len(), 1);
