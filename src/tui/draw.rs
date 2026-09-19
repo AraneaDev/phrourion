@@ -329,7 +329,7 @@ pub(super) fn help_rect(area: Rect, content_height: u16) -> Rect {
     )
 }
 
-fn help_lines(groups: &[keys::BindingGroup], app: &App) -> Vec<Line<'static>> {
+fn help_lines(groups: &[keys::BindingGroup], app: &App, stack_rows: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for group in groups {
         if !lines.is_empty() {
@@ -353,21 +353,34 @@ fn help_lines(groups: &[keys::BindingGroup], app: &App) -> Vec<Line<'static>> {
             } else {
                 format!("{} (unavailable)", binding.description)
             };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    binding.keys,
-                    Style::default().fg(if available {
-                        Color::Cyan
-                    } else {
-                        Color::DarkGray
-                    }),
-                ),
-                Span::raw(" "),
-                Span::styled(description, Style::default().fg(tone)),
-            ]));
+            let key = Span::styled(
+                binding.keys,
+                Style::default().fg(if available {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                }),
+            );
+            let description = Span::styled(description, Style::default().fg(tone));
+            if stack_rows {
+                lines.push(Line::from(key));
+                lines.push(Line::from(vec![Span::raw("  "), description]));
+            } else {
+                lines.push(Line::from(vec![key, Span::raw(" "), description]));
+            }
         }
     }
     lines
+}
+
+fn wrapped_line_count(lines: &[Line<'static>], width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .map(|line| line.width().div_ceil(width as usize).max(1))
+        .sum::<usize>() as u16
 }
 
 fn draw_help_modal(frame: &mut Frame, app: &mut App) {
@@ -382,9 +395,15 @@ fn draw_help_modal(frame: &mut Frame, app: &mut App) {
     } else {
         (groups, &[][..])
     };
-    let left_lines = help_lines(left_groups, app);
-    let right_lines = help_lines(right_groups, app);
-    let content_height = left_lines.len().max(right_lines.len()) as u16;
+    let left_lines = help_lines(left_groups, app, !two_columns);
+    let right_lines = help_lines(right_groups, app, false);
+    let panel_width = help_rect(frame.area(), 0).width;
+    let content_width = panel_width.saturating_sub(2);
+    let content_height = if two_columns {
+        left_lines.len().max(right_lines.len()) as u16
+    } else {
+        wrapped_line_count(&left_lines, content_width)
+    };
     let area = help_rect(frame.area(), content_height);
     if area.is_empty() {
         return;
@@ -423,7 +442,12 @@ fn draw_help_modal(frame: &mut Frame, app: &mut App) {
         frame.render_widget(Paragraph::new(left_lines).scroll((scroll, 0)), columns[0]);
         frame.render_widget(Paragraph::new(right_lines).scroll((scroll, 0)), columns[2]);
     } else {
-        frame.render_widget(Paragraph::new(left_lines).scroll((scroll, 0)), vertical[0]);
+        frame.render_widget(
+            Paragraph::new(left_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0)),
+            vertical[0],
+        );
     }
 
     let mut controls = vec![Line::styled(

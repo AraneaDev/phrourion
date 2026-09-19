@@ -101,11 +101,20 @@ pub(super) enum Mode {
     Checkout(String),
     ConfirmCheckout(Box<CheckoutPreview>),
     Remove(String),
-    Help { previous: Box<Mode>, scroll: u16 },
+    Help {
+        previous: Box<Mode>,
+        scroll: u16,
+        pending: Option<PendingPreview>,
+    },
     Workspace(String),
     CreateWorkspace(String),
     AddWorkspace(String),
     RemoveWorkspace(String),
+}
+
+pub(super) enum PendingPreview {
+    Pull(PullPreview),
+    Checkout(CheckoutPreview),
 }
 
 pub struct App {
@@ -170,12 +179,19 @@ impl App {
         self.mode = Mode::Help {
             previous: Box::new(previous),
             scroll: 0,
+            pending: None,
         };
     }
     pub(super) fn close_help(&mut self) {
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         self.mode = match mode {
-            Mode::Help { previous, .. } => *previous,
+            Mode::Help {
+                previous, pending, ..
+            } => match pending {
+                Some(PendingPreview::Pull(preview)) => Mode::Confirm(Box::new(preview)),
+                Some(PendingPreview::Checkout(preview)) => Mode::ConfirmCheckout(Box::new(preview)),
+                None => *previous,
+            },
             other => other,
         };
     }

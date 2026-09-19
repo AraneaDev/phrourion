@@ -1,6 +1,6 @@
 use super::{
     animation::exit_screen,
-    app::{App, AttentionPriority, Mode, RowState},
+    app::{App, AttentionPriority, Mode, PendingPreview, RowState},
     cache::save_cache,
     draw::draw,
 };
@@ -205,6 +205,32 @@ fn apply_help_action(app: &mut App, action: HelpAction) {
     }
 }
 
+pub(super) fn apply_preview_message(app: &mut App, message: Message) {
+    app.action_busy = false;
+    match message {
+        Message::Preview(result) => match *result {
+            Ok(preview) => present_preview(app, PendingPreview::Pull(preview)),
+            Err(error) => app.record(error),
+        },
+        Message::CheckoutPreview(result) => match *result {
+            Ok(preview) => present_preview(app, PendingPreview::Checkout(preview)),
+            Err(error) => app.record(error),
+        },
+        _ => unreachable!("only preview messages belong here"),
+    }
+}
+
+fn present_preview(app: &mut App, preview: PendingPreview) {
+    if let Mode::Help { pending, .. } = &mut app.mode {
+        *pending = Some(preview);
+        return;
+    }
+    app.mode = match preview {
+        PendingPreview::Pull(preview) => Mode::Confirm(Box::new(preview)),
+        PendingPreview::Checkout(preview) => Mode::ConfirmCheckout(Box::new(preview)),
+    };
+}
+
 // A remote fetch is "failed" for backoff purposes if any of the three
 // always-attempted calls errored — a disabled feature (Observation
 // {supported: false}) is not a failure, only an actual error is.
@@ -333,18 +359,10 @@ pub(super) async fn event_loop(
                     last_local = Instant::now() - Duration::from_secs(5);
                 }
                 Message::Preview(result) => {
-                    app.action_busy = false;
-                    match *result {
-                        Ok(p) => app.mode = Mode::Confirm(Box::new(p)),
-                        Err(e) => app.record(e),
-                    }
+                    apply_preview_message(app, Message::Preview(result));
                 }
                 Message::CheckoutPreview(result) => {
-                    app.action_busy = false;
-                    match *result {
-                        Ok(p) => app.mode = Mode::ConfirmCheckout(Box::new(p)),
-                        Err(e) => app.record(e),
-                    }
+                    apply_preview_message(app, Message::CheckoutPreview(result));
                 }
                 Message::Action(result) => {
                     app.action_busy = false;

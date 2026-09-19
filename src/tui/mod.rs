@@ -40,13 +40,14 @@ mod tests {
             meter, spinner_frame, state_color, status_color, triage, worse_state,
         },
         event_loop::{
-            Dispatch, HelpAction, KeyContext, TabDirection, accepts_confirmation, dispatch_for,
-            entered_notice_tier, help_action, is_press, is_quit_hotkey, next_failure_count,
-            next_tab, notify_script, opens_help, remote_backoff, remote_failed, tab_direction,
+            Dispatch, HelpAction, KeyContext, Message, TabDirection, accepts_confirmation,
+            apply_preview_message, dispatch_for, entered_notice_tier, help_action, is_press,
+            is_quit_hotkey, next_failure_count, next_tab, notify_script, opens_help,
+            remote_backoff, remote_failed, tab_direction,
         },
     };
     use crate::{
-        git::{LocalState, PullPreview},
+        git::{CheckoutPreview, LocalState, PullPreview},
         model::{Observation, RemoteState, Repo},
         registry::Registry,
     };
@@ -61,6 +62,16 @@ mod tests {
             target: target.into(),
             tracking_remote: "origin".into(),
             tracking_ref: "refs/remotes/origin/main".into(),
+        }
+    }
+
+    fn checkout_preview(number: u64) -> CheckoutPreview {
+        CheckoutPreview {
+            repo: test_row(LocalState::default()).repo,
+            before: LocalState::default(),
+            number,
+            branch: format!("pr/{number}"),
+            target: "def456".into(),
         }
     }
 
@@ -211,11 +222,70 @@ mod tests {
             app.mode,
             app::Mode::Help {
                 ref previous,
-                scroll: 0
+                scroll: 0,
+                ..
             } if matches!(previous.as_ref(), app::Mode::Add(input) if input == "draft")
         ));
         app.close_help();
         assert!(matches!(app.mode, app::Mode::Add(ref input) if input == "draft"));
+    }
+
+    #[test]
+    fn pull_preview_waits_for_help_to_close_and_preserves_suspended_input() {
+        let mut app = App::new(Vec::new());
+        app.mode = app::Mode::Add("partially typed".into());
+        app.open_help();
+
+        apply_preview_message(
+            &mut app,
+            Message::Preview(Box::new(Ok(pull_preview("abc123")))),
+        );
+
+        assert!(matches!(
+            app.mode,
+            app::Mode::Help {
+                ref previous,
+                pending: Some(_),
+                ..
+            } if matches!(previous.as_ref(), app::Mode::Add(input) if input == "partially typed")
+        ));
+        assert_eq!(
+            dispatch_for(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                KeyContext::Help
+            ),
+            Dispatch::Help(HelpAction::Ignore)
+        );
+
+        app.close_help();
+        assert!(matches!(
+            app.mode,
+            app::Mode::Confirm(ref preview) if preview.target == "abc123"
+        ));
+    }
+
+    #[test]
+    fn checkout_preview_waits_for_help_to_close() {
+        let mut app = App::new(Vec::new());
+        app.open_help();
+
+        apply_preview_message(
+            &mut app,
+            Message::CheckoutPreview(Box::new(Ok(checkout_preview(42)))),
+        );
+
+        assert!(matches!(
+            app.mode,
+            app::Mode::Help {
+                pending: Some(_),
+                ..
+            }
+        ));
+        app.close_help();
+        assert!(matches!(
+            app.mode,
+            app::Mode::ConfirmCheckout(ref preview) if preview.number == 42
+        ));
     }
 
     #[test]
@@ -1344,6 +1414,14 @@ mod tests {
     }
 
     #[test]
+    fn help_modal_wraps_narrow_rows_instead_of_truncating_descriptions() {
+        let mut app = test_app_in_help_mode();
+        let buffer = render_app(&mut app, 32, 12);
+
+        assert!(buffer_contains(&buffer, "select repository"));
+    }
+
+    #[test]
     fn help_modal_scrolls_rows_but_keeps_controls_visible() {
         let mut app = test_app_in_help_mode();
         let at_top = render_app(&mut app, 48, 14);
@@ -1351,7 +1429,7 @@ mod tests {
         let app::Mode::Help { scroll, .. } = &mut app.mode else {
             panic!("test app should be in help mode");
         };
-        *scroll = 8;
+        *scroll = 16;
         let scrolled = render_app(&mut app, 48, 14);
 
         assert!(buffer_contains(&at_top, "Navigation"));
@@ -1378,7 +1456,7 @@ mod tests {
         assert!(buffer_contains(&narrow, "Esc / ? / F1 / q close help"));
         assert_eq!(
             help_scroll(&app),
-            Some(37),
+            Some(69),
             "narrow rendering must store the viewport maximum"
         );
 
