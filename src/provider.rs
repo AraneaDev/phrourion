@@ -98,8 +98,13 @@ pub fn flatten_pages(value: Value, key: Option<&str>) -> Result<Vec<Value>> {
     let pages = value.as_array().context("Expected paginated response")?;
     let mut rows = Vec::new();
     for page in pages {
-        let array = key
-            .map_or(page, |k| &page[k])
+        let page = match key {
+            Some(k) => page
+                .get(k)
+                .with_context(|| format!("Missing paginated field `{k}`"))?,
+            None => page,
+        };
+        let array = page
             .as_array()
             .context("Incomplete or malformed provider page")?;
         rows.extend(array.iter().cloned());
@@ -507,6 +512,18 @@ mod tests {
     }
 
     #[test]
+    fn pagination_reports_the_missing_field_when_a_page_has_no_requested_key() {
+        let error = flatten_pages(json!([{"check_runs": []}, {}]), Some("check_runs"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("Missing paginated field `check_runs`"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn rate_limit_detection_matches_ghs_stderr_phrasing_only() {
         assert!(is_rate_limited(
             "gh: API rate limit exceeded for user ID 123. (HTTP 403)"
@@ -562,6 +579,20 @@ mod tests {
         assert_eq!(item.title, "#42 Crash on empty registry");
         assert_eq!(item.url, "https://github.com/o/r/issues/42");
         assert_eq!(item.detail, "bug, triage");
+    }
+
+    #[test]
+    fn text_and_issue_items_tolerate_missing_or_malformed_optional_fields() {
+        assert_eq!(text(&json!({"title": 42}), "title"), "");
+        assert_eq!(text(&json!({}), "title"), "");
+
+        let item = issue_item(&json!({
+            "number": 7,
+            "title": "Incomplete issue",
+            "labels": [{"name": "bug"}, {"name": 42}, "malformed"],
+        }));
+        assert_eq!(item.title, "#7 Incomplete issue");
+        assert_eq!(item.detail, "bug");
     }
 
     #[test]
@@ -623,6 +654,18 @@ mod tests {
     }
 
     #[test]
+    fn pr_item_uses_placeholders_and_marks_drafts() {
+        let item = pr_item(&json!({
+            "number": 9,
+            "title": "Draft change",
+            "draft": true,
+        }));
+        assert_eq!(item.title, "#9 Draft change");
+        assert_eq!(item.url, "");
+        assert_eq!(item.detail, "? -> ? | head ? | draft");
+    }
+
+    #[test]
     fn release_item_formats_tag_url_and_published_detail() {
         let v = json!({
             "tag_name": "v1.2.3",
@@ -648,6 +691,19 @@ mod tests {
         assert_eq!(item.title, "CI");
         assert_eq!(item.url, "https://example.com/runs/1");
         assert_eq!(item.detail, "completed success | deadbee");
+    }
+
+    #[test]
+    fn release_and_workflow_items_use_empty_strings_for_missing_fields() {
+        let release = release_item(&json!({}));
+        assert_eq!(release.title, "");
+        assert_eq!(release.url, "");
+        assert_eq!(release.detail, "published ");
+
+        let run = run_item(&json!({}));
+        assert_eq!(run.title, "");
+        assert_eq!(run.url, "");
+        assert_eq!(run.detail, "  | ");
     }
 
     #[tokio::test]
