@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod draw;
 mod event_loop;
+mod keys;
 
 pub use app::{App, RowState};
 pub use draw::draw;
@@ -44,13 +45,80 @@ mod tests {
         },
     };
     use crate::{
-        git::LocalState,
+        git::{LocalState, PullPreview},
         model::{Observation, RemoteState, Repo},
         registry::Registry,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::style::Color;
     use std::time::{Duration, Instant};
+
+    fn pull_preview(target: &str) -> PullPreview {
+        PullPreview {
+            repo: test_row(LocalState::default()).repo,
+            before: LocalState::default(),
+            target: target.into(),
+            tracking_remote: "origin".into(),
+            tracking_ref: "refs/remotes/origin/main".into(),
+        }
+    }
+
+    #[test]
+    fn help_mode_restores_filter_text() {
+        let mut app = App::new(Vec::new());
+        app.filter = "needle".into();
+        app.mode = app::Mode::Filter;
+
+        app.open_help();
+        app.close_help();
+
+        assert_eq!(app.filter, "needle");
+        assert!(matches!(app.mode, app::Mode::Filter));
+    }
+
+    #[test]
+    fn help_mode_restores_add_input() {
+        let mut app = App::new(Vec::new());
+        app.mode = app::Mode::Add("partially typed".into());
+
+        app.open_help();
+        app.close_help();
+
+        assert!(matches!(app.mode, app::Mode::Add(ref input) if input == "partially typed"));
+    }
+
+    #[test]
+    fn help_mode_restores_confirmation_preview() {
+        let mut app = App::new(Vec::new());
+        app.mode = app::Mode::Confirm(Box::new(pull_preview("abc123")));
+
+        app.open_help();
+        app.close_help();
+
+        assert!(matches!(
+            app.mode,
+            app::Mode::Confirm(ref preview) if preview.target == "abc123"
+        ));
+    }
+
+    #[test]
+    fn help_mode_opening_twice_keeps_one_suspended_layer() {
+        let mut app = App::new(Vec::new());
+        app.mode = app::Mode::Add("draft".into());
+
+        app.open_help();
+        app.open_help();
+
+        assert!(matches!(
+            app.mode,
+            app::Mode::Help {
+                ref previous,
+                scroll: 0
+            } if matches!(previous.as_ref(), app::Mode::Add(input) if input == "draft")
+        ));
+        app.close_help();
+        assert!(matches!(app.mode, app::Mode::Add(ref input) if input == "draft"));
+    }
 
     #[test]
     fn notify_script_escapes_quotes_and_backslashes_in_repo_supplied_text() {

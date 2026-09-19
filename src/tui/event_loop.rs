@@ -468,7 +468,7 @@ pub(super) async fn event_loop(
                     KeyCode::Esc | KeyCode::Char('n') => app.mode = Mode::Normal,
                     _ => {}
                 },
-                Mode::Help => app.mode = Mode::Normal,
+                Mode::Help { .. } => app.close_help(),
                 Mode::Normal => match key.code {
                     KeyCode::Char('q') => {
                         exit_screen(terminal).await?;
@@ -484,7 +484,7 @@ pub(super) async fn event_loop(
                         app.scroll = 0;
                     }
                     KeyCode::Char('/') => app.mode = Mode::Filter,
-                    KeyCode::Char('?') => app.mode = Mode::Help,
+                    KeyCode::Char('?') => app.open_help(),
                     KeyCode::Char('w') => app.mode = Mode::Workspace(String::new()),
                     KeyCode::Char('n') if !app.action_busy => {
                         app.mode = Mode::CreateWorkspace(String::new())

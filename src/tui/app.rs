@@ -101,7 +101,7 @@ pub(super) enum Mode {
     Checkout(String),
     ConfirmCheckout(Box<CheckoutPreview>),
     Remove(String),
-    Help,
+    Help { previous: Box<Mode>, scroll: u16 },
     Workspace(String),
     CreateWorkspace(String),
     AddWorkspace(String),
@@ -161,6 +161,23 @@ impl App {
             mode: Mode::Normal,
             action_busy: false,
         }
+    }
+    pub(super) fn open_help(&mut self) {
+        if matches!(self.mode, Mode::Help { .. }) {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.mode, Mode::Normal);
+        self.mode = Mode::Help {
+            previous: Box::new(previous),
+            scroll: 0,
+        };
+    }
+    pub(super) fn close_help(&mut self) {
+        let mode = std::mem::replace(&mut self.mode, Mode::Normal);
+        self.mode = match mode {
+            Mode::Help { previous, .. } => *previous,
+            other => other,
+        };
     }
     pub(super) fn visible(&self) -> Vec<usize> {
         let query = self.filter.to_lowercase();
