@@ -96,6 +96,115 @@ pub(super) fn is_quit_hotkey(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TabDirection {
+    Previous,
+    Next,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HelpAction {
+    Close,
+    ScrollDown,
+    ScrollUp,
+    PageDown,
+    PageUp,
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyContext {
+    Dashboard,
+    TextInput,
+    Confirmation,
+    Help,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Dispatch {
+    OpenHelp,
+    Help(HelpAction),
+    ModeSpecific,
+}
+
+pub(super) fn next_tab(current: usize, direction: TabDirection) -> usize {
+    match direction {
+        TabDirection::Previous => (current + 5) % 6,
+        TabDirection::Next => (current + 1) % 6,
+    }
+}
+
+pub(super) fn tab_direction(key: KeyEvent) -> Option<TabDirection> {
+    match key.code {
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => Some(TabDirection::Previous),
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab | KeyCode::Enter => {
+            Some(TabDirection::Next)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn opens_help(key: KeyEvent, is_text_input: bool) -> bool {
+    key.code == KeyCode::F(1) || (!is_text_input && key.code == KeyCode::Char('?'))
+}
+
+pub(super) fn accepts_confirmation(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+}
+
+pub(super) fn help_action(key: KeyEvent) -> HelpAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) | KeyCode::Char('q') => HelpAction::Close,
+        KeyCode::Char('j') | KeyCode::Down => HelpAction::ScrollDown,
+        KeyCode::Char('k') | KeyCode::Up => HelpAction::ScrollUp,
+        KeyCode::PageDown => HelpAction::PageDown,
+        KeyCode::PageUp => HelpAction::PageUp,
+        _ => HelpAction::Ignore,
+    }
+}
+
+fn key_context(mode: &Mode) -> KeyContext {
+    match mode {
+        Mode::Normal => KeyContext::Dashboard,
+        Mode::Add(_)
+        | Mode::Filter
+        | Mode::Checkout(_)
+        | Mode::Workspace(_)
+        | Mode::CreateWorkspace(_)
+        | Mode::AddWorkspace(_)
+        | Mode::RemoveWorkspace(_) => KeyContext::TextInput,
+        Mode::Confirm(_) | Mode::ConfirmCheckout(_) | Mode::Remove(_) => KeyContext::Confirmation,
+        Mode::Help { .. } => KeyContext::Help,
+    }
+}
+
+pub(super) fn dispatch_for(key: KeyEvent, context: KeyContext) -> Dispatch {
+    match context {
+        KeyContext::Help => Dispatch::Help(help_action(key)),
+        KeyContext::Dashboard if opens_help(key, false) => Dispatch::OpenHelp,
+        KeyContext::TextInput if opens_help(key, true) => Dispatch::OpenHelp,
+        KeyContext::Confirmation if key.code == KeyCode::F(1) => Dispatch::OpenHelp,
+        _ => Dispatch::ModeSpecific,
+    }
+}
+
+fn apply_help_action(app: &mut App, action: HelpAction) {
+    if action == HelpAction::Close {
+        app.close_help();
+        return;
+    }
+    let Mode::Help { scroll, .. } = &mut app.mode else {
+        return;
+    };
+    match action {
+        HelpAction::ScrollDown => *scroll = scroll.saturating_add(1),
+        HelpAction::ScrollUp => *scroll = scroll.saturating_sub(1),
+        HelpAction::PageDown => *scroll = scroll.saturating_add(8),
+        HelpAction::PageUp => *scroll = scroll.saturating_sub(8),
+        HelpAction::Close | HelpAction::Ignore => {}
+    }
+}
+
 // A remote fetch is "failed" for backoff purposes if any of the three
 // always-attempted calls errored — a disabled feature (Observation
 // {supported: false}) is not a failure, only an actual error is.
@@ -269,6 +378,17 @@ pub(super) async fn event_loop(
                 exit_screen(terminal).await?;
                 break;
             }
+            match dispatch_for(key, key_context(&app.mode)) {
+                Dispatch::OpenHelp => {
+                    app.open_help();
+                    continue;
+                }
+                Dispatch::Help(action) => {
+                    apply_help_action(app, action);
+                    continue;
+                }
+                Dispatch::ModeSpecific => {}
+            }
             match &mut app.mode {
                 Mode::Add(input) => match key.code {
                     KeyCode::Esc => app.mode = Mode::Normal,
@@ -403,7 +523,7 @@ pub(super) async fn event_loop(
                     _ => {}
                 },
                 Mode::Confirm(preview) => match key.code {
-                    KeyCode::Char('y') => {
+                    _ if accepts_confirmation(key) => {
                         let preview = preview.clone();
                         let tx = tx.clone();
                         app.mode = Mode::Normal;
@@ -444,7 +564,7 @@ pub(super) async fn event_loop(
                     _ => {}
                 },
                 Mode::ConfirmCheckout(preview) => match key.code {
-                    KeyCode::Char('y') => {
+                    _ if accepts_confirmation(key) => {
                         let preview = preview.clone();
                         let tx = tx.clone();
                         app.mode = Mode::Normal;
@@ -457,7 +577,7 @@ pub(super) async fn event_loop(
                     _ => {}
                 },
                 Mode::Remove(id) => match key.code {
-                    KeyCode::Char('y') => {
+                    _ if accepts_confirmation(key) => {
                         let id = id.clone();
                         match registry::remove(config, &id) {
                             Ok(()) => app.rows.retain(|r| r.repo.id != id),
@@ -468,7 +588,7 @@ pub(super) async fn event_loop(
                     KeyCode::Esc | KeyCode::Char('n') => app.mode = Mode::Normal,
                     _ => {}
                 },
-                Mode::Help { .. } => app.close_help(),
+                Mode::Help { .. } => {}
                 Mode::Normal => match key.code {
                     KeyCode::Char('q') => {
                         exit_screen(terminal).await?;
@@ -484,7 +604,6 @@ pub(super) async fn event_loop(
                         app.scroll = 0;
                     }
                     KeyCode::Char('/') => app.mode = Mode::Filter,
-                    KeyCode::Char('?') => app.open_help(),
                     KeyCode::Char('w') => app.mode = Mode::Workspace(String::new()),
                     KeyCode::Char('n') if !app.action_busy => {
                         app.mode = Mode::CreateWorkspace(String::new())
@@ -510,8 +629,8 @@ pub(super) async fn event_loop(
                         app.tab = c as usize - '1' as usize;
                         app.scroll = 0;
                     }
-                    KeyCode::Enter | KeyCode::Tab => {
-                        app.tab = (app.tab + 1) % 6;
+                    _ if tab_direction(key).is_some() => {
+                        app.tab = next_tab(app.tab, tab_direction(key).unwrap());
                         app.scroll = 0;
                     }
                     KeyCode::PageDown => app.scroll = app.scroll.saturating_add(8),

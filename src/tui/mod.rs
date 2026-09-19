@@ -40,8 +40,9 @@ mod tests {
             meter, spinner_frame, state_color, status_color, triage, worse_state,
         },
         event_loop::{
-            entered_notice_tier, is_press, is_quit_hotkey, next_failure_count, notify_script,
-            remote_backoff, remote_failed,
+            Dispatch, HelpAction, KeyContext, TabDirection, accepts_confirmation, dispatch_for,
+            entered_notice_tier, help_action, is_press, is_quit_hotkey, next_failure_count,
+            next_tab, notify_script, opens_help, remote_backoff, remote_failed, tab_direction,
         },
     };
     use crate::{
@@ -61,6 +62,103 @@ mod tests {
             tracking_remote: "origin".into(),
             tracking_ref: "refs/remotes/origin/main".into(),
         }
+    }
+
+    #[test]
+    fn tab_navigation_wraps_in_both_directions() {
+        assert_eq!(next_tab(0, TabDirection::Previous), 5);
+        assert_eq!(next_tab(5, TabDirection::Next), 0);
+    }
+
+    #[test]
+    fn help_keys_are_contextual_and_do_not_consume_text_question_marks() {
+        assert!(opens_help(
+            KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+            false
+        ));
+        assert!(!opens_help(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            true
+        ));
+    }
+
+    #[test]
+    fn tab_navigation_accepts_letters_arrows_and_tab_keys() {
+        for code in [KeyCode::Char('h'), KeyCode::Left, KeyCode::BackTab] {
+            assert_eq!(
+                tab_direction(KeyEvent::new(code, KeyModifiers::NONE)),
+                Some(TabDirection::Previous)
+            );
+        }
+        for code in [
+            KeyCode::Char('l'),
+            KeyCode::Right,
+            KeyCode::Tab,
+            KeyCode::Enter,
+        ] {
+            assert_eq!(
+                tab_direction(KeyEvent::new(code, KeyModifiers::NONE)),
+                Some(TabDirection::Next)
+            );
+        }
+    }
+
+    #[test]
+    fn enter_follows_the_confirmation_acceptance_path() {
+        assert!(accepts_confirmation(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE
+        )));
+        assert!(accepts_confirmation(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
+        assert!(!accepts_confirmation(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn help_close_and_scroll_keys_are_local_actions() {
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Char('?'),
+            KeyCode::F(1),
+            KeyCode::Char('q'),
+        ] {
+            assert_eq!(
+                help_action(KeyEvent::new(code, KeyModifiers::NONE)),
+                HelpAction::Close
+            );
+        }
+        for (code, expected) in [
+            (KeyCode::Char('j'), HelpAction::ScrollDown),
+            (KeyCode::Down, HelpAction::ScrollDown),
+            (KeyCode::Char('k'), HelpAction::ScrollUp),
+            (KeyCode::Up, HelpAction::ScrollUp),
+            (KeyCode::PageDown, HelpAction::PageDown),
+            (KeyCode::PageUp, HelpAction::PageUp),
+        ] {
+            assert_eq!(
+                help_action(KeyEvent::new(code, KeyModifiers::NONE)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn dashboard_actions_are_suppressed_while_help_is_open() {
+        let action_key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        assert_eq!(
+            dispatch_for(action_key, KeyContext::Help),
+            Dispatch::Help(HelpAction::Ignore)
+        );
+        assert_eq!(
+            dispatch_for(action_key, KeyContext::Dashboard),
+            Dispatch::ModeSpecific
+        );
     }
 
     #[test]
