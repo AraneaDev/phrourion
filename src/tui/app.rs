@@ -101,11 +101,20 @@ pub(super) enum Mode {
     Checkout(String),
     ConfirmCheckout(Box<CheckoutPreview>),
     Remove(String),
-    Help,
+    Help {
+        previous: Box<Mode>,
+        scroll: u16,
+        pending: Box<Option<PendingPreview>>,
+    },
     Workspace(String),
     CreateWorkspace(String),
     AddWorkspace(String),
     RemoveWorkspace(String),
+}
+
+pub(super) enum PendingPreview {
+    Pull(PullPreview),
+    Checkout(CheckoutPreview),
 }
 
 pub struct App {
@@ -161,6 +170,30 @@ impl App {
             mode: Mode::Normal,
             action_busy: false,
         }
+    }
+    pub fn open_help(&mut self) {
+        if matches!(self.mode, Mode::Help { .. }) {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.mode, Mode::Normal);
+        self.mode = Mode::Help {
+            previous: Box::new(previous),
+            scroll: 0,
+            pending: Box::new(None),
+        };
+    }
+    pub(super) fn close_help(&mut self) {
+        let mode = std::mem::replace(&mut self.mode, Mode::Normal);
+        self.mode = match mode {
+            Mode::Help {
+                previous, pending, ..
+            } => match *pending {
+                Some(PendingPreview::Pull(preview)) => Mode::Confirm(Box::new(preview)),
+                Some(PendingPreview::Checkout(preview)) => Mode::ConfirmCheckout(Box::new(preview)),
+                None => *previous,
+            },
+            other => other,
+        };
     }
     pub(super) fn visible(&self) -> Vec<usize> {
         let query = self.filter.to_lowercase();

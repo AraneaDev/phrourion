@@ -7,6 +7,22 @@ use phrourion::{
 use ratatui::{Terminal, backend::TestBackend, buffer::Cell, style::Color};
 use std::{env, fs, path::PathBuf};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScreenshotMode {
+    Dashboard,
+    Help,
+}
+
+impl ScreenshotMode {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "dashboard" => Ok(Self::Dashboard),
+            "help" => Ok(Self::Help),
+            other => anyhow::bail!("unknown screenshot mode: {other}"),
+        }
+    }
+}
+
 fn color(value: Color) -> &'static str {
     match value {
         Color::Reset | Color::White => "#d8dee9",
@@ -48,7 +64,11 @@ async fn main() -> Result<()> {
         .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("docs/screenshots/dashboard.svg"));
+    let mode = ScreenshotMode::parse(args.next().as_deref().unwrap_or("dashboard"))?;
     let mut app = tui::App::with_registry(registry::load(&config)?);
+    if mode == ScreenshotMode::Help {
+        app.open_help();
+    }
     if env::var_os("PHROURION_SCREENSHOT_LIVE").is_some() {
         for row in &mut app.rows {
             row.local = match git::snapshot(&row.repo).await {
@@ -68,7 +88,7 @@ async fn main() -> Result<()> {
     }
     let backend = TestBackend::new(140, 42);
     let mut terminal = Terminal::new(backend)?;
-    terminal.draw(|frame| tui::draw(frame, &app))?;
+    terminal.draw(|frame| tui::draw(frame, &mut app))?;
     let buffer = terminal.backend().buffer();
     let width = buffer.area.width as usize * 8;
     let height = buffer.area.height as usize * 16;
@@ -98,4 +118,19 @@ async fn main() -> Result<()> {
     fs::write(&output, svg).with_context(|| format!("Cannot write {}", output.display()))?;
     println!("Wrote {}", output.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScreenshotMode;
+
+    #[test]
+    fn screenshot_mode_accepts_dashboard_and_help() {
+        assert_eq!(
+            ScreenshotMode::parse("dashboard").unwrap(),
+            ScreenshotMode::Dashboard
+        );
+        assert_eq!(ScreenshotMode::parse("help").unwrap(), ScreenshotMode::Help);
+        assert!(ScreenshotMode::parse("unknown").is_err());
+    }
 }

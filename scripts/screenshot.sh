@@ -3,6 +3,13 @@ set -euo pipefail
 
 config=${1-}
 output=${2-docs/screenshots/dashboard.svg}
+mode=${3-dashboard}
 
-args=(--bin phro-screenshot -- "$config" "$output")
-cargo run --quiet "${args[@]}"
+args=(--bin phro-screenshot -- "$config" "$output" "$mode")
+if [[ -n ${PHROURION_SCREENSHOT_LIVE-} ]]; then
+  cargo run --quiet "${args[@]}"
+else
+  screenshot_cache=$(mktemp -d)
+  trap 'rmdir "$screenshot_cache" 2>/dev/null || true' EXIT
+  XDG_CACHE_HOME=$screenshot_cache cargo run --quiet "${args[@]}"
+fi

@@ -2,4 +2,5 @@
 set -euo pipefail
 
 scripts/screenshot.sh "${PHROURION_SCREENSHOT_CONFIG-}" docs/screenshots/dashboard.svg
-git add docs/screenshots/dashboard.svg
+scripts/screenshot.sh "${PHROURION_SCREENSHOT_CONFIG-}" docs/screenshots/help-modal.svg help
+git add docs/screenshots/dashboard.svg docs/screenshots/help-modal.svg

@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod draw;
 mod event_loop;
+mod keys;
 
 pub use app::{App, RowState};
 pub use draw::draw;
@@ -39,18 +40,254 @@ mod tests {
             meter, spinner_frame, state_color, status_color, triage, worse_state,
         },
         event_loop::{
-            entered_notice_tier, is_press, is_quit_hotkey, next_failure_count, notify_script,
-            remote_backoff, remote_failed,
+            Dispatch, HelpAction, KeyContext, Message, TabDirection, accepts_confirmation,
+            apply_preview_message, dispatch_for, entered_notice_tier, help_action, is_press,
+            is_quit_hotkey, next_failure_count, next_tab, notify_script, opens_help,
+            remote_backoff, remote_failed, tab_direction,
         },
     };
     use crate::{
-        git::LocalState,
+        git::{CheckoutPreview, LocalState, PullPreview},
         model::{Observation, RemoteState, Repo},
         registry::Registry,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-    use ratatui::style::Color;
+    use ratatui::{buffer::Buffer, style::Color};
     use std::time::{Duration, Instant};
+
+    fn pull_preview(target: &str) -> PullPreview {
+        PullPreview {
+            repo: test_row(LocalState::default()).repo,
+            before: LocalState::default(),
+            target: target.into(),
+            tracking_remote: "origin".into(),
+            tracking_ref: "refs/remotes/origin/main".into(),
+        }
+    }
+
+    fn checkout_preview(number: u64) -> CheckoutPreview {
+        CheckoutPreview {
+            repo: test_row(LocalState::default()).repo,
+            before: LocalState::default(),
+            number,
+            branch: format!("pr/{number}"),
+            target: "def456".into(),
+        }
+    }
+
+    #[test]
+    fn tab_navigation_wraps_in_both_directions() {
+        assert_eq!(next_tab(0, TabDirection::Previous), 5);
+        assert_eq!(next_tab(5, TabDirection::Next), 0);
+    }
+
+    #[test]
+    fn help_keys_are_contextual_and_do_not_consume_text_question_marks() {
+        assert!(opens_help(
+            KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+            false
+        ));
+        assert!(!opens_help(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            true
+        ));
+    }
+
+    #[test]
+    fn tab_navigation_accepts_letters_arrows_and_tab_keys() {
+        for code in [KeyCode::Char('h'), KeyCode::Left, KeyCode::BackTab] {
+            assert_eq!(
+                tab_direction(KeyEvent::new(code, KeyModifiers::NONE)),
+                Some(TabDirection::Previous)
+            );
+        }
+        for code in [
+            KeyCode::Char('l'),
+            KeyCode::Right,
+            KeyCode::Tab,
+            KeyCode::Enter,
+        ] {
+            assert_eq!(
+                tab_direction(KeyEvent::new(code, KeyModifiers::NONE)),
+                Some(TabDirection::Next)
+            );
+        }
+    }
+
+    #[test]
+    fn enter_follows_the_confirmation_acceptance_path() {
+        assert!(accepts_confirmation(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE
+        )));
+        assert!(accepts_confirmation(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
+        assert!(!accepts_confirmation(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn help_close_and_scroll_keys_are_local_actions() {
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Char('?'),
+            KeyCode::F(1),
+            KeyCode::Char('q'),
+        ] {
+            assert_eq!(
+                help_action(KeyEvent::new(code, KeyModifiers::NONE)),
+                HelpAction::Close
+            );
+        }
+        for (code, expected) in [
+            (KeyCode::Char('j'), HelpAction::ScrollDown),
+            (KeyCode::Down, HelpAction::ScrollDown),
+            (KeyCode::Char('k'), HelpAction::ScrollUp),
+            (KeyCode::Up, HelpAction::ScrollUp),
+            (KeyCode::PageDown, HelpAction::PageDown),
+            (KeyCode::PageUp, HelpAction::PageUp),
+        ] {
+            assert_eq!(
+                help_action(KeyEvent::new(code, KeyModifiers::NONE)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn dashboard_actions_are_suppressed_while_help_is_open() {
+        let action_key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        assert_eq!(
+            dispatch_for(action_key, KeyContext::Help),
+            Dispatch::Help(HelpAction::Ignore)
+        );
+        assert_eq!(
+            dispatch_for(action_key, KeyContext::Dashboard),
+            Dispatch::ModeSpecific
+        );
+    }
+
+    #[test]
+    fn help_mode_restores_filter_text() {
+        let mut app = App::new(Vec::new());
+        app.filter = "needle".into();
+        app.mode = app::Mode::Filter;
+
+        app.open_help();
+        app.close_help();
+
+        assert_eq!(app.filter, "needle");
+        assert!(matches!(app.mode, app::Mode::Filter));
+    }
+
+    #[test]
+    fn help_mode_restores_add_input() {
+        let mut app = App::new(Vec::new());
+        app.mode = app::Mode::Add("partially typed".into());
+
+        app.open_help();
+        app.close_help();
+
+        assert!(matches!(app.mode, app::Mode::Add(ref input) if input == "partially typed"));
+    }
+
+    #[test]
+    fn help_mode_restores_confirmation_preview() {
+        let mut app = App::new(Vec::new());
+        app.mode = app::Mode::Confirm(Box::new(pull_preview("abc123")));
+
+        app.open_help();
+        app.close_help();
+
+        assert!(matches!(
+            app.mode,
+            app::Mode::Confirm(ref preview) if preview.target == "abc123"
+        ));
+    }
+
+    #[test]
+    fn help_mode_opening_twice_keeps_one_suspended_layer() {
+        let mut app = App::new(Vec::new());
+        app.mode = app::Mode::Add("draft".into());
+
+        app.open_help();
+        app.open_help();
+
+        assert!(matches!(
+            app.mode,
+            app::Mode::Help {
+                ref previous,
+                scroll: 0,
+                ..
+            } if matches!(previous.as_ref(), app::Mode::Add(input) if input == "draft")
+        ));
+        app.close_help();
+        assert!(matches!(app.mode, app::Mode::Add(ref input) if input == "draft"));
+    }
+
+    #[test]
+    fn pull_preview_waits_for_help_to_close_and_preserves_suspended_input() {
+        let mut app = App::new(Vec::new());
+        app.mode = app::Mode::Add("partially typed".into());
+        app.open_help();
+
+        apply_preview_message(
+            &mut app,
+            Message::Preview(Box::new(Ok(pull_preview("abc123")))),
+        );
+
+        assert!(matches!(
+            app.mode,
+            app::Mode::Help {
+                ref previous,
+                ref pending,
+                ..
+            } if pending.as_ref().is_some()
+                && matches!(previous.as_ref(), app::Mode::Add(input) if input == "partially typed")
+        ));
+        assert_eq!(
+            dispatch_for(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                KeyContext::Help
+            ),
+            Dispatch::Help(HelpAction::Ignore)
+        );
+
+        app.close_help();
+        assert!(matches!(
+            app.mode,
+            app::Mode::Confirm(ref preview) if preview.target == "abc123"
+        ));
+    }
+
+    #[test]
+    fn checkout_preview_waits_for_help_to_close() {
+        let mut app = App::new(Vec::new());
+        app.open_help();
+
+        apply_preview_message(
+            &mut app,
+            Message::CheckoutPreview(Box::new(Ok(checkout_preview(42)))),
+        );
+
+        assert!(matches!(
+            app.mode,
+            app::Mode::Help {
+                ref pending,
+                ..
+            } if pending.as_ref().is_some()
+        ));
+        app.close_help();
+        assert!(matches!(
+            app.mode,
+            app::Mode::ConfirmCheckout(ref preview) if preview.number == 42
+        ));
+    }
 
     #[test]
     fn notify_script_escapes_quotes_and_backslashes_in_repo_supplied_text() {
@@ -285,7 +522,7 @@ mod tests {
             app.rows.push(row);
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
-            terminal.draw(|f| draw(f, &app)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
             let buffer = terminal.backend().buffer();
             let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
             assert!(text.contains("Attention"));
@@ -299,7 +536,8 @@ mod tests {
         for (width, height) in [(40, 12), (120, 40)] {
             let backend = ratatui::backend::TestBackend::new(width, height);
             let mut terminal = ratatui::Terminal::new(backend).unwrap();
-            terminal.draw(|f| draw(f, &App::new(Vec::new()))).unwrap();
+            let mut app = App::new(Vec::new());
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
             let buffer = terminal.backend().buffer();
             let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
             assert!(text.contains("P H R O U R I O N"));
@@ -520,7 +758,7 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(140, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         // One `char` per terminal cell (every symbol used in this UI is a single
         // Unicode scalar), so byte offsets from `str::find` would misalign across
@@ -804,7 +1042,7 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(140, 30);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
         let lines: Vec<Vec<char>> = (0..buffer.area.height)
             .map(|y| {
@@ -860,7 +1098,7 @@ mod tests {
             ..LocalState::default()
         })); // dirty: ◆, not calm
 
-        let text = render_text(&app);
+        let text = render_text(&mut app);
         // meter(2, 3, 8) = 6 filled blocks; meter(1, 3, 8) (the wrong count
         // a `==` -> `!=` mutation would produce) is 3 -- distinguishable by
         // counting. Nothing else in the UI renders '█'.
@@ -1084,17 +1322,216 @@ mod tests {
         }
     }
 
-    fn render_text(app: &App) -> String {
-        let backend = ratatui::backend::TestBackend::new(140, 30);
+    fn render_app(app: &mut App, width: u16, height: u16) -> Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_lines(buffer: &Buffer) -> Vec<String> {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn buffer_contains(buffer: &Buffer, needle: &str) -> bool {
+        buffer_lines(buffer)
+            .iter()
+            .any(|line| line.contains(needle))
+    }
+
+    fn render_text(app: &mut App) -> String {
+        render_app(app, 140, 30)
             .content
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    fn test_app_in_help_mode() -> App {
+        let mut app = App::new(Vec::new());
+        app.open_help();
+        app
+    }
+
+    fn help_scroll(app: &App) -> Option<u16> {
+        match &app.mode {
+            app::Mode::Help { scroll, .. } => Some(*scroll),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn help_modal_is_centered_and_contains_grouped_bindings() {
+        let mut app = test_app_in_help_mode();
+        let buffer = render_app(&mut app, 100, 30);
+
+        assert!(buffer_contains(&buffer, "Keyboard help"));
+        for title in [
+            "Navigation",
+            "Details",
+            "Repository actions",
+            "Workspaces",
+            "Input fields",
+            "Confirmations",
+            "Help",
+        ] {
+            assert!(buffer_contains(&buffer, title), "missing group {title}");
+        }
+        assert!(buffer_contains(&buffer, "r / R refresh selected / all"));
+        assert!(buffer_contains(&buffer, "Esc / ? / F1 / q close help"));
+
+        let lines = buffer_lines(&buffer);
+        let top = lines
+            .iter()
+            .find(|line| line.contains("Keyboard help"))
+            .expect("modal title row");
+        let cells = top.chars().collect::<Vec<_>>();
+        let left = cells.iter().position(|cell| *cell == '┌').unwrap();
+        let right = cells.iter().rposition(|cell| *cell == '┐').unwrap();
+        assert!(left.abs_diff(99 - right) <= 1, "modal must be centered");
+    }
+
+    #[test]
+    fn help_modal_clamps_to_a_narrow_terminal() {
+        let mut app = test_app_in_help_mode();
+        let buffer = render_app(&mut app, 32, 12);
+        let lines = buffer_lines(&buffer);
+        let top = lines
+            .iter()
+            .find(|line| line.contains("Keyboard help"))
+            .expect("modal title must remain visible");
+        let cells = top.chars().collect::<Vec<_>>();
+
+        assert_eq!(cells.iter().position(|cell| *cell == '┌'), Some(1));
+        assert_eq!(cells.iter().rposition(|cell| *cell == '┐'), Some(30));
+        assert!(buffer_contains(&buffer, "Esc / ? / F1 / q close help"));
+        assert!(buffer_contains(&buffer, "↑/↓ scroll"));
+    }
+
+    #[test]
+    fn help_modal_wraps_narrow_rows_instead_of_truncating_descriptions() {
+        let mut app = test_app_in_help_mode();
+        let buffer = render_app(&mut app, 32, 12);
+
+        assert!(buffer_contains(&buffer, "select repository"));
+    }
+
+    #[test]
+    fn help_modal_narrow_scroll_reaches_the_final_wrapped_description() {
+        let mut app = test_app_in_help_mode();
+        let app::Mode::Help { scroll, .. } = &mut app.mode else {
+            panic!("test app should be in help mode");
+        };
+        *scroll = u16::MAX;
+
+        let buffer = render_app(&mut app, 20, 12);
+
+        assert!(buffer_contains(&buffer, "page"));
+    }
+
+    #[test]
+    fn help_modal_scrolls_rows_but_keeps_controls_visible() {
+        let mut app = test_app_in_help_mode();
+        let at_top = render_app(&mut app, 48, 14);
+
+        let app::Mode::Help { scroll, .. } = &mut app.mode else {
+            panic!("test app should be in help mode");
+        };
+        *scroll = 16;
+        let scrolled = render_app(&mut app, 48, 14);
+
+        assert!(buffer_contains(&at_top, "Navigation"));
+        assert!(!buffer_contains(&at_top, "Repository actions"));
+        assert!(!buffer_contains(&scrolled, "Navigation"));
+        assert!(buffer_contains(&scrolled, "Repository actions"));
+        for buffer in [&at_top, &scrolled] {
+            assert!(buffer_contains(buffer, "Keyboard help"));
+            assert!(buffer_contains(buffer, "Esc / ? / F1 / q close help"));
+            assert!(buffer_contains(buffer, "↑/↓ scroll"));
+        }
+    }
+
+    #[test]
+    fn help_modal_normalizes_stored_scroll_after_resize() {
+        let mut app = test_app_in_help_mode();
+        let app::Mode::Help { scroll, .. } = &mut app.mode else {
+            panic!("test app should be in help mode");
+        };
+        *scroll = u16::MAX;
+
+        let narrow = render_app(&mut app, 48, 14);
+        assert!(buffer_contains(&narrow, "Keyboard help"));
+        assert!(buffer_contains(&narrow, "Esc / ? / F1 / q close help"));
+        assert_eq!(
+            help_scroll(&app),
+            Some(69),
+            "narrow rendering must store the viewport maximum"
+        );
+
+        let wide = render_app(&mut app, 100, 30);
+        assert!(buffer_contains(&wide, "Keyboard help"));
+        assert!(buffer_contains(&wide, "Esc / ? / F1 / q close help"));
+        assert_eq!(
+            help_scroll(&app),
+            Some(0),
+            "resizing to a fully visible modal must reset stored overscroll"
+        );
+    }
+
+    #[test]
+    fn normal_footer_is_a_compact_catalog_hint() {
+        let mut app = App::new(Vec::new());
+        let buffer = render_app(&mut app, 140, 30);
+        let footer = buffer_lines(&buffer)[28..].join("\n");
+
+        assert!(footer.contains("? help · Enter details · / filter · r refresh · q quit"));
+        assert!(!footer.contains("w workspace"));
+        assert!(!footer.contains("m/u membership"));
+    }
+
+    #[test]
+    fn help_modal_marks_selection_actions_unavailable_without_a_repository() {
+        let mut app = test_app_in_help_mode();
+        let buffer = render_app(&mut app, 100, 30);
+
+        assert!(buffer_contains(&buffer, "d remove checkout (unavailable)"));
+        assert!(buffer_contains(&buffer, "a add checkout"));
+        assert!(!buffer_contains(&buffer, "a add checkout (unavailable)"));
+    }
+
+    #[test]
+    fn help_modal_matches_terminal_busy_dispatch_availability() {
+        let mut app = App::new(Vec::new());
+        app.rows.push(test_row(LocalState::default()));
+        app.action_busy = true;
+        app.open_help();
+
+        let buffer = render_app(&mut app, 100, 30);
+
+        assert!(buffer_contains(&buffer, "t open terminal (unavailable)"));
+        assert!(buffer_contains(&buffer, "o open remote page"));
+        assert!(!buffer_contains(
+            &buffer,
+            "o open remote page (unavailable)"
+        ));
+    }
+
+    #[test]
+    fn help_mode_footer_shows_only_the_catalog_close_hint() {
+        let mut app = App::new(Vec::new());
+        app.open_help();
+
+        let buffer = render_app(&mut app, 140, 30);
+        let footer = buffer_lines(&buffer)[28..].join("\n");
+
+        assert!(footer.contains("Esc / ? / F1 / q close help"));
+        assert!(!footer.contains("a add"));
     }
 
     #[test]
@@ -1123,19 +1560,19 @@ mod tests {
         app.rows.push(row);
 
         app.tab = 0;
-        assert!(render_text(&app).contains("HEAD: abc123head"));
+        assert!(render_text(&mut app).contains("HEAD: abc123head"));
 
         app.tab = 1;
-        assert!(render_text(&app).contains("Local and cached remote-tracking branches"));
+        assert!(render_text(&mut app).contains("Local and cached remote-tracking branches"));
 
         app.tab = 2;
-        assert!(render_text(&app).contains("pr-marker"));
+        assert!(render_text(&mut app).contains("pr-marker"));
 
         app.tab = 3;
-        assert!(render_text(&app).contains("issue-marker"));
+        assert!(render_text(&mut app).contains("issue-marker"));
 
         app.tab = 4;
-        assert!(render_text(&app).contains("proposal-marker"));
+        assert!(render_text(&mut app).contains("proposal-marker"));
     }
 
     #[test]
@@ -1145,14 +1582,14 @@ mod tests {
         let mut app = App::new(Vec::new());
         app.rows.push(error_row);
         app.tab = 0;
-        assert!(render_text(&app).contains("Default branch: !"));
+        assert!(render_text(&mut app).contains("Default branch: !"));
 
         let mut loading_row = test_row(LocalState::default());
         loading_row.remote.default_branch = Observation::default();
         let mut app = App::new(Vec::new());
         app.rows.push(loading_row);
         app.tab = 0;
-        assert!(render_text(&app).contains("Default branch: …"));
+        assert!(render_text(&mut app).contains("Default branch: …"));
     }
 
     #[test]
@@ -1160,10 +1597,10 @@ mod tests {
         let mut app = App::new(Vec::new());
         app.rows.push(test_row(LocalState::default()));
 
-        let render_at = |width: u16| -> String {
+        let mut render_at = |width: u16| -> String {
             let backend = ratatui::backend::TestBackend::new(width, 30);
             let mut terminal = ratatui::Terminal::new(backend).unwrap();
-            terminal.draw(|f| draw(f, &app)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
             terminal
                 .backend()
                 .buffer()
@@ -1189,12 +1626,12 @@ mod tests {
         app.rows.push(test_row(LocalState::default()));
 
         assert!(
-            render_text(&app).contains("? help"),
+            render_text(&mut app).contains("? help"),
             "idle hint should show the full key list"
         );
 
         app.action_busy = true;
-        let busy_text = render_text(&app);
+        let busy_text = render_text(&mut app);
         assert!(
             busy_text.contains("action running"),
             "busy hint should show while an action runs"
@@ -1207,18 +1644,18 @@ mod tests {
         let mut app = App::new(Vec::new());
         app.rows.push(test_row(LocalState::default()));
         app.log.push("footer-marker-text".into());
-        assert!(render_text(&app).contains("footer-marker-text"));
+        assert!(render_text(&mut app).contains("footer-marker-text"));
 
         app.log.push(String::new());
         assert!(
-            !render_text(&app).contains("footer-marker-text"),
+            !render_text(&mut app).contains("footer-marker-text"),
             "an empty last entry must not resurrect the prior marker"
         );
     }
 
     #[test]
     fn action_status_color_reflects_failures_then_actionable_then_calm() {
-        let color_at_action = |app: &App| -> Color {
+        let color_at_action = |app: &mut App| -> Color {
             let backend = ratatui::backend::TestBackend::new(140, 30);
             let mut terminal = ratatui::Terminal::new(backend).unwrap();
             terminal.draw(|f| draw(f, app)).unwrap();
@@ -1242,18 +1679,18 @@ mod tests {
             ..Default::default()
         }]);
         failing_app.rows.push(failing_row);
-        assert_eq!(color_at_action(&failing_app), Color::Red);
+        assert_eq!(color_at_action(&mut failing_app), Color::Red);
 
         let mut actionable_app = App::new(Vec::new());
         actionable_app.rows.push(test_row(LocalState {
             modified: 1,
             ..LocalState::default()
         }));
-        assert_eq!(color_at_action(&actionable_app), Color::Yellow);
+        assert_eq!(color_at_action(&mut actionable_app), Color::Yellow);
 
         let mut calm_app = App::new(Vec::new());
         calm_app.rows.push(test_row(LocalState::default()));
-        assert_eq!(color_at_action(&calm_app), Color::Green);
+        assert_eq!(color_at_action(&mut calm_app), Color::Green);
     }
 
     #[test]
