@@ -1,6 +1,8 @@
 pub(crate) struct Binding {
     pub keys: &'static str,
     pub description: &'static str,
+    availability: Availability,
+    compact: Option<CompactHint>,
 }
 
 pub(crate) struct BindingGroup {
@@ -8,153 +10,143 @@ pub(crate) struct BindingGroup {
     pub bindings: &'static [Binding],
 }
 
+#[derive(Clone, Copy)]
+enum Availability {
+    Always,
+    Idle,
+    Selection,
+    IdleSelection,
+}
+
+#[derive(Clone, Copy)]
+struct CompactHint {
+    order: u8,
+    text: &'static str,
+}
+
+const fn binding(keys: &'static str, description: &'static str) -> Binding {
+    Binding {
+        keys,
+        description,
+        availability: Availability::Always,
+        compact: None,
+    }
+}
+
+const fn available_when(
+    keys: &'static str,
+    description: &'static str,
+    availability: Availability,
+) -> Binding {
+    Binding {
+        keys,
+        description,
+        availability,
+        compact: None,
+    }
+}
+
+const fn compact(
+    keys: &'static str,
+    description: &'static str,
+    order: u8,
+    text: &'static str,
+) -> Binding {
+    Binding {
+        keys,
+        description,
+        availability: Availability::Always,
+        compact: Some(CompactHint { order, text }),
+    }
+}
+
+const fn compact_when(
+    keys: &'static str,
+    description: &'static str,
+    availability: Availability,
+    order: u8,
+    text: &'static str,
+) -> Binding {
+    Binding {
+        keys,
+        description,
+        availability,
+        compact: Some(CompactHint { order, text }),
+    }
+}
+
+impl Binding {
+    pub(crate) fn is_available(&self, has_selection: bool, action_busy: bool) -> bool {
+        match self.availability {
+            Availability::Always => true,
+            Availability::Idle => !action_busy,
+            Availability::Selection => has_selection,
+            Availability::IdleSelection => has_selection && !action_busy,
+        }
+    }
+}
+
 const NAVIGATION: &[Binding] = &[
-    Binding {
-        keys: "j / k / Up / Down",
-        description: "select repository",
-    },
-    Binding {
-        keys: "q",
-        description: "quit",
-    },
-    Binding {
-        keys: "Ctrl-C",
-        description: "emergency quit",
-    },
+    binding("j / k / Up / Down", "select repository"),
+    compact("q", "quit", 4, "q quit"),
+    binding("Ctrl-C", "emergency quit"),
 ];
 
 const DETAILS: &[Binding] = &[
-    Binding {
-        keys: "h / l / Left / Right",
-        description: "previous / next detail tab",
-    },
-    Binding {
-        keys: "Tab / Shift-Tab",
-        description: "next / previous detail tab",
-    },
-    Binding {
-        keys: "Enter",
-        description: "next detail tab",
-    },
-    Binding {
-        keys: "1-6",
-        description: "select detail tab",
-    },
-    Binding {
-        keys: "PageUp / PageDown",
-        description: "scroll details",
-    },
-    Binding {
-        keys: "Esc",
-        description: "reset details",
-    },
+    binding("h / l / Left / Right", "previous / next detail tab"),
+    binding("Tab / Shift-Tab", "next / previous detail tab"),
+    compact("Enter", "next detail tab", 1, "Enter details"),
+    binding("1-6", "select detail tab"),
+    binding("PageUp / PageDown", "scroll details"),
+    binding("Esc", "reset details"),
 ];
 
 const REPOSITORY_ACTIONS: &[Binding] = &[
-    Binding {
-        keys: "a",
-        description: "add checkout",
-    },
-    Binding {
-        keys: "d",
-        description: "remove checkout",
-    },
-    Binding {
-        keys: "c",
-        description: "checkout pull request",
-    },
-    Binding {
-        keys: "p",
-        description: "pull",
-    },
-    Binding {
-        keys: "r / R",
-        description: "refresh selected / all",
-    },
-    Binding {
-        keys: "o",
-        description: "open remote page",
-    },
-    Binding {
-        keys: "t",
-        description: "open terminal",
-    },
-    Binding {
-        keys: "/",
-        description: "filter repositories",
-    },
+    available_when("a", "add checkout", Availability::Idle),
+    available_when("d", "remove checkout", Availability::IdleSelection),
+    available_when("c", "checkout pull request", Availability::IdleSelection),
+    available_when("p", "pull", Availability::IdleSelection),
+    compact_when(
+        "r / R",
+        "refresh selected / all",
+        Availability::IdleSelection,
+        3,
+        "r refresh",
+    ),
+    available_when("o", "open remote page", Availability::Selection),
+    available_when("t", "open terminal", Availability::Selection),
+    compact("/", "filter repositories", 2, "/ filter"),
 ];
 
 const WORKSPACES: &[Binding] = &[
-    Binding {
-        keys: "w",
-        description: "select workspace",
-    },
-    Binding {
-        keys: "n",
-        description: "create workspace",
-    },
-    Binding {
-        keys: "m / u",
-        description: "add / remove membership",
-    },
+    binding("w", "select workspace"),
+    available_when("n", "create workspace", Availability::Idle),
+    available_when(
+        "m / u",
+        "add / remove membership",
+        Availability::IdleSelection,
+    ),
 ];
 
 const INPUT_FIELDS: &[Binding] = &[
-    Binding {
-        keys: "Printable characters",
-        description: "type",
-    },
-    Binding {
-        keys: "Backspace",
-        description: "edit",
-    },
-    Binding {
-        keys: "Enter",
-        description: "submit",
-    },
-    Binding {
-        keys: "Esc",
-        description: "cancel",
-    },
-    Binding {
-        keys: "F1",
-        description: "open help",
-    },
+    binding("Printable characters", "type"),
+    binding("Backspace", "edit"),
+    binding("Enter", "submit"),
+    binding("Esc", "cancel"),
+    binding("F1", "open help"),
 ];
 
 const CONFIRMATIONS: &[Binding] = &[
-    Binding {
-        keys: "y / Enter",
-        description: "confirm",
-    },
-    Binding {
-        keys: "n / Esc",
-        description: "cancel",
-    },
-    Binding {
-        keys: "F1",
-        description: "open help",
-    },
+    binding("y / Enter", "confirm"),
+    binding("n / Esc", "cancel"),
+    binding("F1", "open help"),
 ];
 
 const HELP: &[Binding] = &[
-    Binding {
-        keys: "? / F1",
-        description: "open help",
-    },
-    Binding {
-        keys: "Esc / ? / F1 / q",
-        description: "close help",
-    },
-    Binding {
-        keys: "j / k / Up / Down",
-        description: "scroll help",
-    },
-    Binding {
-        keys: "PageUp / PageDown",
-        description: "scroll help by page",
-    },
+    compact("? / F1", "open help", 0, "? help"),
+    binding("Esc / ? / F1 / q", "close help"),
+    binding("j / k / Up / Down", "scroll help"),
+    binding("PageUp / PageDown", "scroll help by page"),
 ];
 
 const CATALOG: &[BindingGroup] = &[
@@ -204,6 +196,20 @@ pub(crate) fn help_close_hint() -> String {
         })
         .expect("help catalog must contain a close binding");
     format!("{} {}", binding.keys, binding.description)
+}
+
+pub(crate) fn compact_footer_hint() -> String {
+    let mut hints = catalog()
+        .iter()
+        .flat_map(|group| group.bindings.iter())
+        .filter_map(|binding| binding.compact)
+        .collect::<Vec<_>>();
+    hints.sort_unstable_by_key(|hint| hint.order);
+    hints
+        .into_iter()
+        .map(|hint| hint.text)
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 #[cfg(test)]

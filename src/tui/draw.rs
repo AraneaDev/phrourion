@@ -11,11 +11,11 @@ use crate::{
 };
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     prelude::Alignment,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
 };
 
 pub(super) fn attention_priority_color(priority: AttentionPriority) -> Color {
@@ -302,6 +302,140 @@ pub(super) fn items(label: &str, observation: &Observation<Vec<crate::model::Ite
         }
     }
     s
+}
+
+const HELP_MAX_WIDTH: u16 = 98;
+// At this width the modal has enough room for two readable binding columns.
+const HELP_TWO_COLUMN_MIN_WIDTH: u16 = 96;
+
+pub(super) fn help_rect(area: Rect, content_height: u16) -> Rect {
+    let available_width = if area.width > 2 {
+        area.width - 2
+    } else {
+        area.width
+    };
+    let available_height = if area.height > 2 {
+        area.height - 2
+    } else {
+        area.height
+    };
+    let width = HELP_MAX_WIDTH.min(available_width);
+    let height = content_height.saturating_add(3).min(available_height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn help_lines(groups: &[keys::BindingGroup], app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for group in groups {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(
+            group.title,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for binding in group.bindings {
+            let available = binding.is_available(app.current().is_some(), app.action_busy);
+            let tone = if available {
+                Color::Reset
+            } else {
+                Color::DarkGray
+            };
+            let description = if available {
+                binding.description.to_string()
+            } else {
+                format!("{} (unavailable)", binding.description)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    binding.keys,
+                    Style::default().fg(if available {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+                Span::raw(" "),
+                Span::styled(description, Style::default().fg(tone)),
+            ]));
+        }
+    }
+    lines
+}
+
+fn draw_help_modal(frame: &mut Frame, app: &App) {
+    let Mode::Help { scroll, .. } = &app.mode else {
+        return;
+    };
+    let two_columns = frame.area().width >= HELP_TWO_COLUMN_MIN_WIDTH;
+    let groups = keys::catalog();
+    let (left_groups, right_groups) = if two_columns {
+        groups.split_at(3)
+    } else {
+        (groups, &[][..])
+    };
+    let left_lines = help_lines(left_groups, app);
+    let right_lines = help_lines(right_groups, app);
+    let content_height = left_lines.len().max(right_lines.len()) as u16;
+    let area = help_rect(frame.area(), content_height);
+    if area.is_empty() {
+        return;
+    }
+
+    let panel = Block::bordered()
+        .title(" Keyboard help ")
+        .title_alignment(Alignment::Center)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = panel.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(panel, area);
+
+    let initial_body_height = inner.height.saturating_sub(1);
+    let overflow = content_height > initial_body_height;
+    let controls_height = if overflow { 2 } else { 1 }.min(inner.height);
+    let body_height = inner.height.saturating_sub(controls_height);
+    let max_scroll = content_height.saturating_sub(body_height);
+    let scroll = (*scroll).min(max_scroll);
+    let vertical = Layout::vertical([
+        Constraint::Length(body_height),
+        Constraint::Length(controls_height),
+    ])
+    .split(inner);
+
+    if two_columns {
+        let columns = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .split(vertical[0]);
+        frame.render_widget(Paragraph::new(left_lines).scroll((scroll, 0)), columns[0]);
+        frame.render_widget(Paragraph::new(right_lines).scroll((scroll, 0)), columns[2]);
+    } else {
+        frame.render_widget(Paragraph::new(left_lines).scroll((scroll, 0)), vertical[0]);
+    }
+
+    let mut controls = vec![Line::styled(
+        keys::help_close_hint(),
+        Style::default().fg(Color::Cyan),
+    )];
+    if overflow {
+        controls.push(Line::styled(
+            "↑/↓ scroll",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(controls).alignment(Alignment::Center),
+        vertical[1],
+    );
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -681,19 +815,51 @@ pub fn draw(frame: &mut Frame, app: &App) {
         areas[3],
     );
     let hint = match &app.mode {
-        Mode::Add(s) => format!("Add: PATH | REMOTE (remote optional): {}  [Enter save / Esc cancel]", clean(s)),
+        Mode::Add(s) => format!(
+            "Add: PATH | REMOTE (remote optional): {}  [Enter save / Esc cancel]",
+            clean(s)
+        ),
         Mode::Filter => "Type filter, Enter done, Esc clear".into(),
-        Mode::Workspace(s) => format!("Workspace: {}  [Enter select / empty All / Esc cancel]", clean(s)),
-        Mode::CreateWorkspace(s) => format!("Create workspace: {}  [Enter save / Esc cancel]", clean(s)),
-        Mode::AddWorkspace(s) => format!("Add selected repo to workspace (blank = active): {}  [Enter save / Esc cancel]", clean(s)),
-        Mode::RemoveWorkspace(s) => format!("Remove selected repo from workspace (blank = active): {}  [Enter save / Esc cancel]", clean(s)),
-        Mode::Confirm(p) => format!("Pull {} [{}] {} -> {} ({} commits)? y / n", clean(&p.repo.path.display().to_string()), clean(&p.before.branch), &p.before.head[..7.min(p.before.head.len())], &p.target[..7.min(p.target.len())], p.before.behind),
-        Mode::Checkout(s) => format!("Checkout PR number: {}  [Enter preview / Esc cancel]", clean(s)),
-        Mode::ConfirmCheckout(p) => format!("Checkout PR #{} as {} in {}? y / n", p.number, clean(&p.branch), clean(&p.repo.path.display().to_string())),
+        Mode::Workspace(s) => format!(
+            "Workspace: {}  [Enter select / empty All / Esc cancel]",
+            clean(s)
+        ),
+        Mode::CreateWorkspace(s) => {
+            format!("Create workspace: {}  [Enter save / Esc cancel]", clean(s))
+        }
+        Mode::AddWorkspace(s) => format!(
+            "Add selected repo to workspace (blank = active): {}  [Enter save / Esc cancel]",
+            clean(s)
+        ),
+        Mode::RemoveWorkspace(s) => format!(
+            "Remove selected repo from workspace (blank = active): {}  [Enter save / Esc cancel]",
+            clean(s)
+        ),
+        Mode::Confirm(p) => format!(
+            "Pull {} [{}] {} -> {} ({} commits)? y / n",
+            clean(&p.repo.path.display().to_string()),
+            clean(&p.before.branch),
+            &p.before.head[..7.min(p.before.head.len())],
+            &p.target[..7.min(p.target.len())],
+            p.before.behind
+        ),
+        Mode::Checkout(s) => format!(
+            "Checkout PR number: {}  [Enter preview / Esc cancel]",
+            clean(s)
+        ),
+        Mode::ConfirmCheckout(p) => format!(
+            "Checkout PR #{} as {} in {}? y / n",
+            p.number,
+            clean(&p.branch),
+            clean(&p.repo.path.display().to_string())
+        ),
         Mode::Remove(name) => format!("Remove {} from registry only? y / n", clean(name)),
         Mode::Help { .. } => keys::help_close_hint(),
-        Mode::Normal if app.action_busy => format!("{} action running... monitoring remains available", spinner_frame(animation_frame())),
-        Mode::Normal => "? help  w workspace  n new  m/u membership  t terminal  a add  d remove  c checkout  / filter  r refresh  p pull  o browser  q quit".into(),
+        Mode::Normal if app.action_busy => format!(
+            "{} action running... monitoring remains available",
+            spinner_frame(animation_frame())
+        ),
+        Mode::Normal => keys::compact_footer_hint(),
     };
     let mut footer = vec![Line::from(vec![
         Span::styled(
@@ -712,4 +878,5 @@ pub fn draw(frame: &mut Frame, app: &App) {
         footer.push(Line::styled(last, Style::default().fg(Color::Cyan)));
     }
     frame.render_widget(Paragraph::new(footer), areas[4]);
+    draw_help_modal(frame, app);
 }

@@ -51,7 +51,7 @@ mod tests {
         registry::Registry,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-    use ratatui::style::Color;
+    use ratatui::{buffer::Buffer, style::Color};
     use std::time::{Duration, Instant};
 
     fn pull_preview(target: &str) -> PullPreview {
@@ -1250,17 +1250,132 @@ mod tests {
         }
     }
 
-    fn render_text(app: &App) -> String {
-        let backend = ratatui::backend::TestBackend::new(140, 30);
+    fn render_app(app: &App, width: u16, height: u16) -> Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_lines(buffer: &Buffer) -> Vec<String> {
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn buffer_contains(buffer: &Buffer, needle: &str) -> bool {
+        buffer_lines(buffer)
+            .iter()
+            .any(|line| line.contains(needle))
+    }
+
+    fn render_text(app: &App) -> String {
+        render_app(app, 140, 30)
             .content
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    fn test_app_in_help_mode() -> App {
+        let mut app = App::new(Vec::new());
+        app.open_help();
+        app
+    }
+
+    #[test]
+    fn help_modal_is_centered_and_contains_grouped_bindings() {
+        let app = test_app_in_help_mode();
+        let buffer = render_app(&app, 100, 30);
+
+        assert!(buffer_contains(&buffer, "Keyboard help"));
+        for title in [
+            "Navigation",
+            "Details",
+            "Repository actions",
+            "Workspaces",
+            "Input fields",
+            "Confirmations",
+            "Help",
+        ] {
+            assert!(buffer_contains(&buffer, title), "missing group {title}");
+        }
+        assert!(buffer_contains(&buffer, "r / R refresh selected / all"));
+        assert!(buffer_contains(&buffer, "Esc / ? / F1 / q close help"));
+
+        let lines = buffer_lines(&buffer);
+        let top = lines
+            .iter()
+            .find(|line| line.contains("Keyboard help"))
+            .expect("modal title row");
+        let cells = top.chars().collect::<Vec<_>>();
+        let left = cells.iter().position(|cell| *cell == '┌').unwrap();
+        let right = cells.iter().rposition(|cell| *cell == '┐').unwrap();
+        assert!(left.abs_diff(99 - right) <= 1, "modal must be centered");
+    }
+
+    #[test]
+    fn help_modal_clamps_to_a_narrow_terminal() {
+        let app = test_app_in_help_mode();
+        let buffer = render_app(&app, 32, 12);
+        let lines = buffer_lines(&buffer);
+        let top = lines
+            .iter()
+            .find(|line| line.contains("Keyboard help"))
+            .expect("modal title must remain visible");
+        let cells = top.chars().collect::<Vec<_>>();
+
+        assert_eq!(cells.iter().position(|cell| *cell == '┌'), Some(1));
+        assert_eq!(cells.iter().rposition(|cell| *cell == '┐'), Some(30));
+        assert!(buffer_contains(&buffer, "Esc / ? / F1 / q close help"));
+        assert!(buffer_contains(&buffer, "↑/↓ scroll"));
+    }
+
+    #[test]
+    fn help_modal_scrolls_rows_but_keeps_controls_visible() {
+        let mut app = test_app_in_help_mode();
+        let at_top = render_app(&app, 48, 14);
+
+        let app::Mode::Help { scroll, .. } = &mut app.mode else {
+            panic!("test app should be in help mode");
+        };
+        *scroll = 8;
+        let scrolled = render_app(&app, 48, 14);
+
+        assert!(buffer_contains(&at_top, "Navigation"));
+        assert!(!buffer_contains(&at_top, "Repository actions"));
+        assert!(!buffer_contains(&scrolled, "Navigation"));
+        assert!(buffer_contains(&scrolled, "Repository actions"));
+        for buffer in [&at_top, &scrolled] {
+            assert!(buffer_contains(buffer, "Keyboard help"));
+            assert!(buffer_contains(buffer, "Esc / ? / F1 / q close help"));
+            assert!(buffer_contains(buffer, "↑/↓ scroll"));
+        }
+    }
+
+    #[test]
+    fn normal_footer_is_a_compact_catalog_hint() {
+        let app = App::new(Vec::new());
+        let buffer = render_app(&app, 140, 30);
+        let footer = buffer_lines(&buffer)[28..].join("\n");
+
+        assert!(footer.contains("? help · Enter details · / filter · r refresh · q quit"));
+        assert!(!footer.contains("w workspace"));
+        assert!(!footer.contains("m/u membership"));
+    }
+
+    #[test]
+    fn help_modal_marks_selection_actions_unavailable_without_a_repository() {
+        let app = test_app_in_help_mode();
+        let buffer = render_app(&app, 100, 30);
+
+        assert!(buffer_contains(&buffer, "d remove checkout (unavailable)"));
+        assert!(buffer_contains(&buffer, "a add checkout"));
+        assert!(!buffer_contains(&buffer, "a add checkout (unavailable)"));
     }
 
     #[test]
@@ -1268,10 +1383,11 @@ mod tests {
         let mut app = App::new(Vec::new());
         app.open_help();
 
-        let text = render_text(&app);
+        let buffer = render_app(&app, 140, 30);
+        let footer = buffer_lines(&buffer)[28..].join("\n");
 
-        assert!(text.contains("Esc / ? / F1 / q close help"));
-        assert!(!text.contains("a add"));
+        assert!(footer.contains("Esc / ? / F1 / q close help"));
+        assert!(!footer.contains("a add"));
     }
 
     #[test]
