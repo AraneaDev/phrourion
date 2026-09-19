@@ -1166,6 +1166,17 @@ mod tests {
     }
 
     #[test]
+    fn help_mode_footer_shows_only_the_catalog_close_hint() {
+        let mut app = App::new(Vec::new());
+        app.open_help();
+
+        let text = render_text(&app);
+
+        assert!(text.contains("Esc / ? / F1 / q close help"));
+        assert!(!text.contains("a add"));
+    }
+
+    #[test]
     fn details_panel_switches_content_by_tab() {
         // If a tab's match arm were deleted, control would fall to the `_`
         // (log) arm instead, and that tab's marker text — which appears

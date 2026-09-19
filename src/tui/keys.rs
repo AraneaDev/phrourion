@@ -192,6 +192,20 @@ pub(crate) fn catalog() -> &'static [BindingGroup] {
     CATALOG
 }
 
+pub(crate) fn help_close_hint() -> String {
+    let binding = catalog()
+        .iter()
+        .find(|group| group.title == "Help")
+        .and_then(|group| {
+            group
+                .bindings
+                .iter()
+                .find(|binding| binding.description == "close help")
+        })
+        .expect("help catalog must contain a close binding");
+    format!("{} {}", binding.keys, binding.description)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

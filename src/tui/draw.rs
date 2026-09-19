@@ -3,6 +3,7 @@ use super::{
         App, AttentionPriority, CI_FAIL_MARKERS, Mode, RowState, ci_failed_confirmed, known_count,
     },
     cache::CACHE_PLACEHOLDER,
+    keys,
 };
 use crate::{
     git::LocalState,
@@ -690,7 +691,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Checkout(s) => format!("Checkout PR number: {}  [Enter preview / Esc cancel]", clean(s)),
         Mode::ConfirmCheckout(p) => format!("Checkout PR #{} as {} in {}? y / n", p.number, clean(&p.branch), clean(&p.repo.path.display().to_string())),
         Mode::Remove(name) => format!("Remove {} from registry only? y / n", clean(name)),
-        Mode::Help { .. } => "j/k move | 1-6 tabs | PgUp/PgDn scroll | a add | d remove | w workspace | n new | m/u membership | t terminal | c checkout PR | / filter | r fetch/refresh | R all | p pull | o browser | q quit | Esc close".into(),
+        Mode::Help { .. } => keys::help_close_hint(),
         Mode::Normal if app.action_busy => format!("{} action running... monitoring remains available", spinner_frame(animation_frame())),
         Mode::Normal => "? help  w workspace  n new  m/u membership  t terminal  a add  d remove  c checkout  / filter  r refresh  p pull  o browser  q quit".into(),
     };
