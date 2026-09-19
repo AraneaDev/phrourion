@@ -307,7 +307,10 @@ impl RemoteProvider for Forgejo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     // Rust's test harness runs #[test]/#[tokio::test] fns concurrently on
     // separate threads by default, but PHROURION_FORGEJO_TEST_URL and any
@@ -316,56 +319,34 @@ mod tests {
     // two such tests interleave (mirrors tests/forgejo_workflow.rs's
     // LIVE_TEST_LOCK for the same reason). Shared with src/provider.rs's
     // tests, which also set PHROURION_FORGEJO_TEST_URL.
-    use crate::test_support::FORGEJO_ENV_LOCK as ENV_LOCK;
+    use crate::test_support::{FORGEJO_ENV_LOCK as ENV_LOCK, response, test_server};
 
     struct MockResponse {
         status: u16,
         body: String,
     }
 
-    // Serves one canned response per accepted connection, in order, on a
-    // background thread. Returns the server's base URL and a channel that
-    // yields each request's raw bytes (headers included) as it arrives, so
-    // a test can assert on what was actually sent (e.g. an Authorization
-    // header) without a mocking dependency.
-    fn serve_mock(responses: Vec<MockResponse>) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+    // Queues provider-specific responses while the provider-neutral request
+    // parser and TCP server live in crate::test_support.
+    async fn serve_mock(
+        responses: Vec<MockResponse>,
+    ) -> (String, std::sync::mpsc::Receiver<(String, Option<String>)>) {
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for resp in responses {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                let mut buf = [0u8; 8192];
-                let mut request = Vec::new();
-                loop {
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buf[..n]);
-                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let _ = tx.send(request);
-                let reason = match resp.status {
-                    200 => "OK",
-                    404 => "Not Found",
-                    _ => "Error",
-                };
-                let payload = format!(
-                    "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    resp.status,
-                    resp.body.len(),
-                    resp.body
-                );
-                let _ = stream.write_all(payload.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-        (format!("http://{addr}"), rx)
+        let server = test_server(move |request| {
+            let _ = tx.send((
+                request.path().to_string(),
+                request.header("authorization").map(str::to_string),
+            ));
+            let mock_response = responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("mock response queue exhausted");
+            response(mock_response.status, &mock_response.body)
+        })
+        .await;
+        (server.url().to_string(), rx)
     }
 
     // Like serve_mock, but for callers that fire several requests
@@ -376,48 +357,18 @@ mod tests {
     // matches no route gets `[]` (a harmless empty page/object). Runs for
     // the rest of the process, so no response count needs to be known
     // upfront.
-    fn serve_routed_mock(routes: Vec<(&'static str, String)>) -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let routes = std::sync::Arc::new(routes);
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let routes = routes.clone();
-                std::thread::spawn(move || {
-                    let mut buf = [0u8; 8192];
-                    let mut request = Vec::new();
-                    loop {
-                        let n = stream.read(&mut buf).unwrap_or(0);
-                        if n == 0 {
-                            break;
-                        }
-                        request.extend_from_slice(&buf[..n]);
-                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    let request_line = String::from_utf8_lossy(&request)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .to_string();
-                    let body = routes
-                        .iter()
-                        .find(|(pattern, _)| request_line.contains(pattern))
-                        .map(|(_, body)| body.as_str())
-                        .unwrap_or("[]");
-                    let payload = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let _ = stream.write_all(payload.as_bytes());
-                    let _ = stream.flush();
-                });
-            }
-        });
-        format!("http://{addr}")
+    async fn serve_routed_mock(routes: Vec<(&'static str, String)>) -> String {
+        let routes = Arc::new(routes);
+        let server = test_server(move |request| {
+            let body = routes
+                .iter()
+                .find(|(pattern, _)| request.path().contains(pattern))
+                .map(|(_, body)| body.as_str())
+                .unwrap_or("[]");
+            response(200, body)
+        })
+        .await;
+        server.url().to_string()
     }
 
     // Caller must hold ENV_LOCK for the duration of this call. Awaits `fut`
@@ -461,7 +412,8 @@ mod tests {
         let (base, _rx) = serve_mock(vec![MockResponse {
             status: 200,
             body: r#"{"hello":"world"}"#.into(),
-        }]);
+        }])
+        .await;
         let value = with_test_url(&base, get("mock", "anything", &[]))
             .await
             .expect("mock server returned 200 with valid JSON");
@@ -474,7 +426,8 @@ mod tests {
         let (base, _rx) = serve_mock(vec![MockResponse {
             status: 200,
             body: r#"[{"id":1},{"id":2}]"#.into(),
-        }]);
+        }])
+        .await;
         let rows = with_test_url(&base, paginated("mock", "items", &[]))
             .await
             .expect("page should parse")
@@ -490,7 +443,8 @@ mod tests {
         let (base, _rx) = serve_mock(vec![MockResponse {
             status: 404,
             body: r#"{"message":"Not Found"}"#.into(),
-        }]);
+        }])
+        .await;
         let result = with_test_url(&base, paginated("mock", "disabled-feature", &[])).await;
         assert!(result.unwrap().is_none());
     }
@@ -517,7 +471,8 @@ mod tests {
                 status: 404,
                 body: r#"{"message":"Not Found"}"#.into(),
             },
-        ]);
+        ])
+        .await;
         let result = with_test_url(&base, paginated("mock", "items", &[])).await;
         assert!(
             result.is_err(),
@@ -544,7 +499,8 @@ mod tests {
                 status: 200,
                 body: r#"[{"id":9001},{"id":9002},{"id":9003}]"#.into(),
             },
-        ]);
+        ])
+        .await;
         let rows = with_test_url(&base, paginated("mock", "items", &[]))
             .await
             .expect("both pages should parse")
@@ -560,7 +516,7 @@ mod tests {
         assert_eq!(rows[50]["id"], 9001);
 
         let _first_request = rx.recv().unwrap();
-        let second_request = String::from_utf8_lossy(&rx.recv().unwrap()).to_lowercase();
+        let second_request = rx.recv().unwrap().0.to_lowercase();
         assert!(
             second_request.contains("page=2"),
             "expected the second request to ask for page 2: {second_request}"
@@ -582,7 +538,8 @@ mod tests {
                 status: 200,
                 body: "{}".into(),
             },
-        ]);
+        ])
+        .await;
 
         unsafe {
             std::env::set_var(&var, "s3cr3t");
@@ -590,7 +547,7 @@ mod tests {
         with_test_url(&base, get(host, "with-token", &[]))
             .await
             .unwrap();
-        let with_token = String::from_utf8_lossy(&rx.recv().unwrap()).to_lowercase();
+        let with_token = rx.recv().unwrap().1;
 
         unsafe {
             std::env::set_var(&var, "");
@@ -598,7 +555,7 @@ mod tests {
         with_test_url(&base, get(host, "without-token", &[]))
             .await
             .unwrap();
-        let without_token = String::from_utf8_lossy(&rx.recv().unwrap()).to_lowercase();
+        let without_token = rx.recv().unwrap().1;
 
         unsafe {
             match &previous_token {
@@ -607,8 +564,8 @@ mod tests {
             }
         }
 
-        assert!(with_token.contains("authorization: token s3cr3t"));
-        assert!(!without_token.contains("authorization"));
+        assert_eq!(with_token.as_deref(), Some("token s3cr3t"));
+        assert!(without_token.is_none());
     }
 
     #[test]
@@ -673,7 +630,8 @@ mod tests {
         let base = serve_routed_mock(vec![(
             "/releases",
             r#"[{"tag_name":"v1-draft","draft":true,"html_url":"u1","published_at":""},{"tag_name":"v2-published","draft":false,"html_url":"u2","published_at":"2024-01-01"}]"#.into(),
-        )]);
+        )])
+        .await;
         let repo = crate::model::Repo {
             id: "t".into(),
             name: "t".into(),

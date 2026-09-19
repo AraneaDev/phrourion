@@ -76,18 +76,23 @@ impl HttpClient {
     }
 
     fn endpoint(&self, path: &str) -> Result<Url> {
-        if path.starts_with("http://") || path.starts_with("https://") {
-            return Url::parse(path).with_context(|| format!("Invalid provider endpoint '{path}'"));
-        }
-        if path.starts_with('/') {
-            return self
-                .base_url
+        let url = if path.starts_with("http://") || path.starts_with("https://") {
+            Url::parse(path).with_context(|| format!("Invalid provider endpoint '{path}'"))?
+        } else if path.starts_with('/') {
+            self.base_url
                 .join(path)
-                .with_context(|| format!("Invalid provider endpoint '{path}'"));
+                .with_context(|| format!("Invalid provider endpoint '{path}'"))?
+        } else {
+            self.base_url
+                .join(path.trim_start_matches('/'))
+                .with_context(|| format!("Invalid provider endpoint '{path}'"))?
+        };
+        if !same_origin(&self.base_url, &url) {
+            bail!(
+                "Provider endpoint '{path}' uses a different origin than the configured base URL"
+            );
         }
-        self.base_url
-            .join(path.trim_start_matches('/'))
-            .with_context(|| format!("Invalid provider endpoint '{path}'"))
+        Ok(url)
     }
 
     fn request(&self, url: Url) -> RequestBuilder {
@@ -98,6 +103,12 @@ impl HttpClient {
             Auth::Basic { username, password } => request.basic_auth(username, Some(password)),
         }
     }
+}
+
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 fn bounded_body_context(body: &str) -> String {
@@ -115,119 +126,12 @@ fn bounded_body_context(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Auth, HttpClient};
+    use crate::test_support::{response, test_server};
     use anyhow::Context;
-    use std::{
-        collections::HashMap,
-        io::{Read, Write},
-        net::{TcpListener, TcpStream},
-        sync::Arc,
-        thread,
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     };
-
-    struct Request {
-        headers: HashMap<String, String>,
-        path: String,
-    }
-
-    impl Request {
-        fn header(&self, name: &str) -> Option<&str> {
-            self.headers
-                .get(&name.to_ascii_lowercase())
-                .map(String::as_str)
-        }
-    }
-
-    struct Response {
-        status: u16,
-        body: String,
-    }
-
-    fn response(status: u16, body: &str) -> Response {
-        Response {
-            status,
-            body: body.into(),
-        }
-    }
-
-    struct TestServer {
-        url: String,
-    }
-
-    impl TestServer {
-        fn url(&self) -> &str {
-            &self.url
-        }
-    }
-
-    async fn test_server(
-        handler: impl Fn(&Request) -> Response + Send + Sync + 'static,
-    ) -> TestServer {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let handler = Arc::new(handler);
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { return };
-                let handler = Arc::clone(&handler);
-                thread::spawn(move || serve_request(stream, handler));
-            }
-        });
-        TestServer {
-            url: format!("http://{address}/api/v1/"),
-        }
-    }
-
-    fn serve_request(
-        mut stream: TcpStream,
-        handler: Arc<dyn Fn(&Request) -> Response + Send + Sync>,
-    ) {
-        let mut bytes = Vec::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            let Ok(read) = stream.read(&mut buffer) else {
-                return;
-            };
-            if read == 0 {
-                return;
-            }
-            bytes.extend_from_slice(&buffer[..read]);
-            if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
-
-        let text = String::from_utf8_lossy(&bytes);
-        let mut lines = text.lines();
-        let request_line = lines.next().unwrap_or_default();
-        let path = request_line
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or_default()
-            .to_string();
-        let headers = lines
-            .take_while(|line| !line.is_empty())
-            .filter_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                Some((name.to_ascii_lowercase(), value.trim().to_string()))
-            })
-            .collect();
-        let request = Request { headers, path };
-        let response = handler(&request);
-        let reason = match response.status {
-            200 => "OK",
-            400 => "Bad Request",
-            404 => "Not Found",
-            500 => "Internal Server Error",
-            _ => "Response",
-        };
-        let payload = format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            response.status,
-            response.body.len(),
-            response.body
-        );
-        let _ = stream.write_all(payload.as_bytes());
-    }
 
     #[tokio::test]
     async fn bearer_auth_and_json_errors_are_normalized() {
@@ -274,7 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn pagination_follows_a_page_object_next_link() {
-        let server = test_server(|request| match request.path.as_str() {
+        let server = test_server(|request| match request.path() {
             "/api/v1/projects/example" => response(
                 200,
                 r#"{"values":[{"id":1}],"next":"/projects/example?page=2"}"#,
@@ -297,5 +201,55 @@ mod tests {
             rows,
             vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})]
         );
+    }
+
+    #[tokio::test]
+    async fn pagination_accepts_a_provider_owned_array_page_shape() {
+        let server = test_server(|_| response(200, r#"[{"id":1},{"id":2}]"#)).await;
+        let client = HttpClient::new(server.url(), Auth::None).unwrap();
+
+        let rows = client
+            .paginate_json("projects/example", |page| {
+                let rows = page.as_array().context("expected an array page")?.clone();
+                Ok((rows, None))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})]
+        );
+    }
+
+    #[tokio::test]
+    async fn pagination_rejects_cross_origin_next_links_before_sending_credentials() {
+        let other_origin_was_requested = Arc::new(AtomicBool::new(false));
+        let other_origin_was_requested_by_server = Arc::clone(&other_origin_was_requested);
+        let other_server = test_server(move |_| {
+            other_origin_was_requested_by_server.store(true, Ordering::SeqCst);
+            response(200, r#"{"values":[{"id":2}]}"#)
+        })
+        .await;
+        let next_link = format!("{}other?page=2", other_server.url());
+        let first_page = format!(r#"{{"values":[{{"id":1}}],"next":"{next_link}"}}"#);
+        let first_server = test_server(move |_| response(200, &first_page)).await;
+        let client =
+            HttpClient::new(first_server.url(), Auth::Bearer("must-not-leak".into())).unwrap();
+
+        let error = client
+            .paginate_json("projects/example", |page| {
+                let rows = page["values"].as_array().context("missing values")?.clone();
+                let next = page["next"].as_str().map(str::to_owned);
+                Ok((rows, next))
+            })
+            .await
+            .expect_err("cross-origin continuation links must be rejected")
+            .to_string();
+
+        assert!(
+            error.contains("different origin"),
+            "unexpected error: {error}"
+        );
+        assert!(!other_origin_was_requested.load(Ordering::SeqCst));
     }
 }
