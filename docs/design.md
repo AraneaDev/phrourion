@@ -29,12 +29,19 @@ Branches main, fix/execution
 Release  latest v5.1.1 | no pending release PRs
 Action   Pull main: 2 incoming commits
 
-a add  / filter  Enter details  r refresh  p pull  o browser  ? help
+? help · Enter details · / filter · r refresh · q quit
 ```
 
 The upper table lists repositories. The lower pane shows the selected repository and its exact folder. Details provide tabs for working tree changes, branches, pull requests, releases, and action output. Narrow terminals hide secondary columns while retaining all fields in details.
 
-Arrow keys and j/k select rows. Enter opens details; Escape returns. `a` opens an add-by-path form. Remove is available through the action menu and removes only the registry entry. `/` filters names and paths. `r` refreshes the selected repository; `R` refreshes all. `p` previews a pull. `o` opens the selected remote item. `?` shows bindings and `q` quits.
+Up/Down and `j`/`k` select rows. Enter opens details; Escape returns. Within
+details, Left/Right and `h`/`l` select the previous or next tab, matching
+Shift-Tab/Tab. The normal footer stays compact and points to the contextual
+keyboard reference: `?` or `F1` opens help, including `F1` from text input and
+confirmation prompts. Closing help restores the interrupted mode. Confirmation
+prompts accept `y` or Enter and cancel with `n` or Escape. The help modal is the
+source of truth for the remaining bindings and marks actions that are currently
+unavailable.
 
 Use text labels alongside color. Preserve selection while results arrive. Errors are attached to the affected repository and do not prevent navigation.
 

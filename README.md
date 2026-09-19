@@ -102,18 +102,14 @@ working tree is clean and no local branch already has the target name; it fetche
 GitHub's `refs/pull/<number>/head` and creates a new local branch (`pr/<number>`)
 from it. Phrourion never stashes changes, resets, rebases, or resolves conflicts.
 
-```text
-r       refresh the selected repository
-R       refresh all repositories
-p       preview and confirm a fast-forward pull
-c       check out a pull request's branch by number
-o       open the repository in a browser
-a       add a repository
-d       remove a repository
-/       filter repositories
-?       show help
-q       quit
-```
+The footer keeps the startup guidance compact: `? help · Enter details · /
+filter · r refresh · q quit`. Press `?` or `F1` for the complete, contextual
+keyboard reference; `F1` also opens it from input and confirmation prompts.
+Closing help returns to the interrupted prompt.
+
+Use `j`/`k` or Up/Down to select repositories. In details, `h`/`l` and
+Left/Right move to the previous or next tab, as do Shift-Tab/Tab. Confirmation
+prompts accept `y` or Enter and cancel with `n` or Escape.
 
 Named workspaces group repositories without moving or duplicating checkout
 registrations. A repository can belong to multiple workspaces, and `All` is
