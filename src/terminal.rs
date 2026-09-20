@@ -172,7 +172,9 @@ mod tests {
 
     async fn wait_for_capture(path: &Path) -> String {
         for _ in 0..100 {
-            if let Ok(contents) = fs::read_to_string(path) {
+            if let Ok(contents) = fs::read_to_string(path)
+                && !contents.is_empty()
+            {
                 return contents;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
