@@ -7,7 +7,15 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn host_environment_name_normalizes_ports_and_punctuation() {
     assert_eq!(
         auth::env_var_for_host("Forge.Example.com:3000"),
-        "PHROURION_TOKEN_FORGE_EXAMPLE_COM_3000"
+        "PHROURION_TOKEN_FORGE_2EEXAMPLE_2ECOM_3A3000"
+    );
+}
+
+#[test]
+fn host_environment_names_do_not_collide_for_punctuation_variants() {
+    assert_ne!(
+        auth::env_var_for_host("a-b.com"),
+        auth::env_var_for_host("a.b-com")
     );
 }
 
@@ -74,4 +82,26 @@ fn github_uses_gh_fallback_after_environment_and_keyring() {
     .unwrap();
     assert_eq!(resolved.source(), auth::CredentialSource::Gh);
     assert_eq!(resolved.secret(), Some("gh-token"));
+}
+
+#[test]
+fn replacing_a_host_account_removes_the_old_provider_secret() {
+    let store = auth::MemoryCredentialStore::default();
+    store
+        .set(ProviderKind::Gitlab, "forge.example", "old-token")
+        .unwrap();
+    let accounts = vec![auth::AuthAccount {
+        provider: ProviderKind::Gitlab,
+        host: "forge.example".into(),
+        label: String::new(),
+        username: String::new(),
+    }];
+    auth::remove_replaced_credential(&store, &accounts, &ProviderKind::Forgejo, "FORGE.EXAMPLE")
+        .unwrap();
+    assert!(
+        store
+            .get(ProviderKind::Gitlab, "forge.example")
+            .unwrap()
+            .is_none()
+    );
 }

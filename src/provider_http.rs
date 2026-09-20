@@ -71,6 +71,44 @@ impl HttpClient {
         self.get_json(path).await
     }
 
+    pub(crate) async fn paginate_json_link_header(&self, path: &str) -> Result<Vec<Value>> {
+        let mut pages = Vec::new();
+        let mut next = Some(path.to_string());
+        let mut visited = HashSet::new();
+        while let Some(endpoint) = next {
+            let url = self.endpoint(&endpoint)?;
+            let normalized = url.to_string();
+            if !visited.insert(normalized) {
+                bail!("Provider pagination repeated endpoint '{endpoint}'");
+            }
+            let response =
+                self.request(url).send().await.with_context(|| {
+                    format!("Provider request failed for endpoint '{endpoint}'")
+                })?;
+            let status = response.status();
+            let next_link = response
+                .headers()
+                .get(reqwest::header::LINK)
+                .and_then(|value| value.to_str().ok())
+                .and_then(next_link);
+            let body = response.text().await.with_context(|| {
+                format!("Failed to read provider response for endpoint '{endpoint}'")
+            })?;
+            if !status.is_success() {
+                bail!(
+                    "Provider endpoint '{endpoint}' returned HTTP {status}: {}",
+                    bounded_body_context(&body)
+                );
+            }
+            pages
+                .push(serde_json::from_str(&body).with_context(|| {
+                    format!("Invalid JSON from provider endpoint '{endpoint}'")
+                })?);
+            next = next_link;
+        }
+        Ok(pages)
+    }
+
     pub(crate) async fn paginate_json<F>(&self, path: &str, mut parse_page: F) -> Result<Vec<Value>>
     where
         F: FnMut(&Value) -> Result<(Vec<Value>, Option<String>)>,
@@ -149,6 +187,16 @@ fn bounded_body_context(body: &str) -> String {
     } else {
         context
     }
+}
+
+fn next_link(header: &str) -> Option<String> {
+    header.split(',').find_map(|part| {
+        let (url, params) = part.trim().split_once('>')?;
+        if !params.contains("rel=\"next\"") && !params.contains("rel=next") {
+            return None;
+        }
+        Some(url.strip_prefix('<')?.to_string())
+    })
 }
 
 #[cfg(test)]

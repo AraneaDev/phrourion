@@ -6,7 +6,10 @@ use phrourion::{
     model::ProviderKind,
     provider, registry, terminal, tui,
 };
-use std::{io::Read, path::PathBuf};
+use std::{
+    io::{IsTerminal, Read},
+    path::PathBuf,
+};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -346,10 +349,22 @@ async fn main() -> Result<()> {
                 if provider == ProviderKind::Local {
                     bail!("Local repositories do not have provider credentials");
                 }
+                if std::io::stdin().is_terminal() {
+                    bail!(
+                        "--token-stdin requires piped input; refusing to read an echoed terminal"
+                    );
+                }
                 let mut token = String::new();
                 std::io::stdin().read_to_string(&mut token)?;
                 let token = token.trim().to_string();
                 let store = KeyringCredentialStore;
+                let existing = registry::load(&config)?;
+                auth::remove_replaced_credential(
+                    &store,
+                    &existing.auth_accounts,
+                    &provider,
+                    &host,
+                )?;
                 store.set(provider.clone(), &host, &token)?;
                 registry::update(&config, |data| {
                     data.auth_accounts

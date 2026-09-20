@@ -99,11 +99,12 @@ async fn gh_api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
 }
 
 async fn http_api(client: &HttpClient, endpoint: &str, pages: bool) -> Result<Value> {
-    let value = client.get_json_value(endpoint).await?;
     if pages {
-        Ok(Value::Array(vec![value]))
+        Ok(Value::Array(
+            client.paginate_json_link_header(endpoint).await?,
+        ))
     } else {
-        Ok(value)
+        Ok(client.get_json_value(endpoint).await?)
     }
 }
 
@@ -933,6 +934,39 @@ mod tests {
             }
         }
         assert_eq!(value["login"], "octocat");
+    }
+
+    #[tokio::test]
+    async fn github_http_api_follows_link_header_pagination() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let server = crate::test_support::test_server(|request| {
+            assert_eq!(request.header("authorization"), Some("Bearer github-token"));
+            match request.path() {
+                "/items" => crate::test_support::response(200, r#"[{"id":1}]"#)
+                    .header("Link", "</items?page=2>; rel=\"next\""),
+                "/items?page=2" => crate::test_support::response(200, r#"[{"id":2}]"#),
+                path => panic!("unexpected GitHub endpoint {path}"),
+            }
+        })
+        .await;
+        let previous_token = std::env::var("PHROURION_GITHUB_TOKEN").ok();
+        let previous_base = std::env::var("PHROURION_GITHUB_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("PHROURION_GITHUB_TOKEN", "github-token");
+            std::env::set_var("PHROURION_GITHUB_BASE_URL", server.root_url());
+        }
+        let value = api(&test_repo(), "items", true).await.unwrap();
+        unsafe {
+            match previous_token {
+                Some(value) => std::env::set_var("PHROURION_GITHUB_TOKEN", value),
+                None => std::env::remove_var("PHROURION_GITHUB_TOKEN"),
+            }
+            match previous_base {
+                Some(value) => std::env::set_var("PHROURION_GITHUB_BASE_URL", value),
+                None => std::env::remove_var("PHROURION_GITHUB_BASE_URL"),
+            }
+        }
+        assert_eq!(flatten_pages(value, None).unwrap().len(), 2);
     }
 
     #[tokio::test]

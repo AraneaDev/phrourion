@@ -20,7 +20,13 @@ pub(crate) static GITLAB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::
 pub struct Gitlab;
 
 fn http_client(host: &str) -> Result<HttpClient> {
-    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.into());
+    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| {
+        if host == "gitlab.com" {
+            DEFAULT_BASE_URL.into()
+        } else {
+            format!("https://{host}/api/v4/")
+        }
+    });
     let resolved = resolve_credential(&KeyringCredentialStore, ProviderKind::Gitlab, host, None)?;
     let auth = resolved
         .secret()

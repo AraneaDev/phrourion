@@ -37,7 +37,7 @@ For ephemeral or headless use, environment variables are preferred:
 export PHROURION_GITHUB_TOKEN='...'
 export PHROURION_GITLAB_TOKEN='...'
 export PHROURION_BITBUCKET_TOKEN='...'
-export PHROURION_TOKEN_FORGE_EXAMPLE_COM='...'
+export PHROURION_TOKEN_FORGE_2EEXAMPLE_2ECOM='...'
 ```
 
 Never put real tokens in shell history, repository files, screenshots, or
@@ -62,10 +62,11 @@ The provider-specific variables are:
 | Bitbucket Cloud | `bitbucket.org` | `PHROURION_BITBUCKET_TOKEN` | `Authorization: Bearer` |
 | Forgejo | `codeberg.org` or explicit host | none | `Authorization: token` |
 
-The normalized-host form is `PHROURION_TOKEN_` followed by the uppercase host
-with every non-alphanumeric character replaced by `_`. For example,
-`forge.example.com:3000` becomes
-`PHROURION_TOKEN_FORGE_EXAMPLE_COM_3000`.
+The normalized-host form is `PHROURION_TOKEN_` followed by the uppercase host.
+Alphanumeric bytes remain unchanged; every other byte is encoded as `_XX` with
+its uppercase hexadecimal value. For example, `forge.example.com:3000` becomes
+`PHROURION_TOKEN_FORGE_2EEXAMPLE_2ECOM_3A3000`. This encoding keeps similar
+hosts distinct.
 
 ## GitHub and GitHub Enterprise
 
@@ -164,8 +165,8 @@ printf '%s\n' "$TOKEN" | phro auth set \
 Bitbucket Server/Data Center is a separate provider kind because its API and
 authentication differ from Bitbucket Cloud. Register it explicitly with
 `--provider bitbucket-server` and use the self-hosted host in `phro auth set`.
-Set `PHROURION_BITBUCKET_BASE_URL` when the server's API is not served from the
-default API base used by the adapter. Confirm the token type and required read
+Set `PHROURION_BITBUCKET_SERVER_BASE_URL` when the server's API is not served
+from the default `/rest/api/1.0/` base. Confirm the token type and required read
 permissions with your administrator's Bitbucket version documentation before
 configuring it.
 

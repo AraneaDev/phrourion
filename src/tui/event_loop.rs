@@ -5,7 +5,7 @@ use super::{
     draw::draw,
 };
 use crate::{
-    auth::{AuthAccount, CredentialStore, KeyringCredentialStore},
+    auth::{self, AuthAccount, CredentialStore, KeyringCredentialStore},
     git::{self, CheckoutPreview, LocalState, PullPreview},
     model::{Observation, ProviderKind, RemoteState, clean},
     provider, registry,
@@ -586,6 +586,13 @@ pub(super) async fn event_loop(
                             }
                             let host = form.host.trim().to_ascii_lowercase();
                             let result = (|| -> Result<()> {
+                                let existing = registry::load(config)?;
+                                auth::remove_replaced_credential(
+                                    &KeyringCredentialStore,
+                                    &existing.auth_accounts,
+                                    &provider,
+                                    &host,
+                                )?;
                                 KeyringCredentialStore.set(
                                     provider.clone(),
                                     &host,

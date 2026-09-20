@@ -1374,6 +1374,7 @@ mod tests {
 
         let buffer = render_app(&mut app, 100, 30);
         assert!(buffer_contains(&buffer, "Provider accounts"));
+        assert!(buffer_contains(&buffer, "(token entered)"));
         assert!(!buffer_contains(&buffer, "do-not-render"));
     }
 

@@ -370,10 +370,10 @@ fn draw_accounts_modal(frame: &mut Frame, app: &App) {
             )
         })
         .collect::<Vec<_>>();
-    let token_display = if form.token.is_empty() {
+    let token_display: String = if form.token.is_empty() {
         "(token hidden)".into()
     } else {
-        "•".repeat(form.token.chars().count().min(32))
+        "(token entered)".into()
     };
     let field = |label: &str, value: &str, active: bool| {
         Line::from(vec![
