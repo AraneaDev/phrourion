@@ -1,6 +1,8 @@
 pub mod command;
 pub mod forgejo;
 pub mod git;
+#[allow(dead_code)]
+pub mod gitlab;
 pub mod model;
 pub mod provider;
 #[allow(dead_code)]

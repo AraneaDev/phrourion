@@ -1,0 +1,16 @@
+{
+  "project": {
+    "path_with_namespace": "acme/widgets",
+    "default_branch": "main"
+  },
+  "branches": [{}],
+  "merge_requests": [
+    {
+      "state": "opened"
+    }
+  ],
+  "issues": [{}],
+  "releases": [{}],
+  "reviewers": [],
+  "pipelines": [{}]
+}
