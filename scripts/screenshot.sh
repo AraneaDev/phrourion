@@ -30,6 +30,15 @@ case "$mode" in
   *) echo "unknown screenshot mode: $mode" >&2; exit 1 ;;
 esac
 
+if command -v magick >/dev/null 2>&1; then
+  image_tool=magick
+elif command -v convert >/dev/null 2>&1; then
+  image_tool=convert
+else
+  echo "ImageMagick is required (magick or convert)" >&2
+  exit 1
+fi
+
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
 
@@ -45,6 +54,6 @@ if [[ -n $output ]]; then
   mkdir -p "$(dirname "$output")"
 fi
 generated="$temporary/output.gif"
-magick -delay 100 -loop 0 "$temporary"/frame-*.png "$generated"
+"$image_tool" -delay 100 -loop 0 "$temporary"/frame-*.png "$generated"
 mv "$generated" "$output"
 echo "Wrote $output"
