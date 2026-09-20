@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}",
+    "display_name": "Rhea Viewer",
+    "nickname": "reviewer",
+    "links": {
+      "html": {
+        "href": "https://bitbucket.example/reviewer"
+      }
+    }
+  }
+]

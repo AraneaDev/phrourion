@@ -1,0 +1,63 @@
+{
+  "pagelen": 2,
+  "page": 1,
+  "size": 2,
+  "values": [
+    {
+      "id": 7,
+      "title": "Add widget support",
+      "state": "OPEN",
+      "draft": false,
+      "links": {
+        "html": {
+          "href": "https://bitbucket.example/acme/widgets/pull-requests/7"
+        }
+      },
+      "source": {
+        "branch": {
+          "name": "feature/widget"
+        },
+        "commit": {
+          "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "destination": {
+        "branch": {
+          "name": "main"
+        }
+      },
+      "reviewers": [
+        {
+          "uuid": "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}",
+          "display_name": "Rhea Viewer",
+          "nickname": "reviewer"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Try alternate widget spacing",
+      "state": "OPEN",
+      "draft": true,
+      "links": {
+        "html": {
+          "href": "https://bitbucket.example/acme/widgets/pull-requests/8"
+        }
+      },
+      "source": {
+        "branch": {
+          "name": "experiment/spacing"
+        },
+        "commit": {
+          "hash": "cccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "destination": {
+        "branch": {
+          "name": "main"
+        }
+      },
+      "reviewers": []
+    }
+  ]
+}

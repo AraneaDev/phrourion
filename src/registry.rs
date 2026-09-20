@@ -443,6 +443,28 @@ mod tests {
     }
 
     #[test]
+    fn hosted_provider_remote_parsing_supports_nested_gitlab_and_bitbucket_projects() {
+        let gitlab = parse_remote("https://gitlab.com/group/subgroup/repo.git", None).unwrap();
+        assert_eq!(gitlab.kind, ProviderKind::Gitlab);
+        assert_eq!(gitlab.project, "group/subgroup/repo");
+
+        let bitbucket = parse_remote("git@bitbucket.org:workspace/repository.git", None).unwrap();
+        assert_eq!(bitbucket.kind, ProviderKind::Bitbucket);
+        assert_eq!(bitbucket.project, "workspace/repository");
+    }
+
+    #[test]
+    fn explicit_provider_override_allows_unknown_host() {
+        let remote = parse_remote(
+            "https://gitlab.example/group/repository.git",
+            Some(ProviderKind::Gitlab),
+        )
+        .unwrap();
+        assert_eq!(remote.kind, ProviderKind::Gitlab);
+        assert!(parse_remote("https://unknown.example/group/repository.git", None).is_err());
+    }
+
+    #[test]
     fn repo_workspace_memberships_round_trip_through_toml() {
         let registry = Registry {
             repos: vec![Repo {

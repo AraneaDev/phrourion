@@ -1,0 +1,14 @@
+{
+  "uuid": "{11111111-2222-3333-4444-555555555555}",
+  "full_name": "acme/widgets",
+  "name": "widgets",
+  "mainbranch": {
+    "name": "main"
+  },
+  "has_issues": true,
+  "links": {
+    "html": {
+      "href": "https://bitbucket.example/acme/widgets"
+    }
+  }
+}

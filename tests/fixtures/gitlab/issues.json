@@ -1,0 +1,9 @@
+[
+  {
+    "iid": 12,
+    "title": "Widget alignment is incorrect",
+    "state": "opened",
+    "web_url": "https://gitlab.example/acme/widgets/-/issues/12",
+    "labels": ["bug", "ui"]
+  }
+]
