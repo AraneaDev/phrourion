@@ -11,6 +11,7 @@ const DEFAULT_BASE_URL: &str = "https://gitlab.com/api/v4/";
 const TOKEN_ENV: &str = "PHROURION_GITLAB_TOKEN";
 const BASE_URL_ENV: &str = "PHROURION_GITLAB_BASE_URL";
 const PAGE_SIZE: usize = 100;
+const MAX_PAGES: usize = 1000;
 
 #[cfg(test)]
 pub(crate) static GITLAB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -43,6 +44,9 @@ async fn paginated(client: &HttpClient, path: &str, query: &[(&str, &str)]) -> R
     let mut rows = Vec::new();
     let mut page = 1;
     loop {
+        if page > MAX_PAGES {
+            bail!("GitLab pagination exceeded {MAX_PAGES} pages for endpoint '{path}'");
+        }
         let endpoint = paginated_endpoint(path, query, page);
         let value = client.get_json_value(&endpoint).await?;
         let batch = value

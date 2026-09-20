@@ -2,8 +2,10 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Client, RequestBuilder, Url};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::{collections::HashSet, net::IpAddr, time::Duration};
 
 const MAX_ERROR_BODY_CHARS: usize = 200;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub(crate) enum Auth {
     None,
@@ -21,13 +23,22 @@ impl HttpClient {
     pub(crate) fn new(base_url: &str, auth: Auth) -> Result<Self> {
         let mut base_url = Url::parse(base_url.trim())
             .with_context(|| format!("Invalid provider base URL '{base_url}'"))?;
+        if base_url.scheme() == "http"
+            && !is_loopback(&base_url)
+            && matches!(&auth, Auth::Bearer(_) | Auth::Basic { .. })
+        {
+            bail!("Credentialed provider requests require HTTPS unless using a loopback test URL");
+        }
         let path = base_url.path().to_string();
         if !path.ends_with('/') {
             base_url.set_path(&format!("{path}/"));
         }
 
         Ok(Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .context("Failed to build provider HTTP client")?,
             base_url,
             auth,
         })
@@ -65,7 +76,12 @@ impl HttpClient {
     {
         let mut rows = Vec::new();
         let mut next = Some(path.to_string());
+        let mut visited = HashSet::new();
         while let Some(endpoint) = next {
+            let normalized = self.endpoint(&endpoint)?.to_string();
+            if !visited.insert(normalized) {
+                bail!("Provider pagination repeated endpoint '{endpoint}'");
+            }
             let page: Value = self.get_json_value(&endpoint).await?;
             let (page_rows, continuation) = parse_page(&page)
                 .with_context(|| format!("Invalid provider pagination page at '{endpoint}'"))?;
@@ -102,6 +118,16 @@ impl HttpClient {
             Auth::Bearer(token) => request.bearer_auth(token),
             Auth::Basic { username, password } => request.basic_auth(username, Some(password)),
         }
+    }
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback()),
+        None => false,
     }
 }
 
@@ -251,5 +277,32 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(!other_origin_was_requested.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn credentialed_non_loopback_http_is_rejected() {
+        let error = match HttpClient::new("http://example.com/api/", Auth::Bearer("token".into())) {
+            Ok(_) => panic!("credentials must not be configured for public HTTP"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("require HTTPS"));
+    }
+
+    #[tokio::test]
+    async fn pagination_rejects_repeated_continuation_endpoints() {
+        let server =
+            test_server(|_| response(200, r#"{"values":[{"id":1}],"next":"/projects/example"}"#))
+                .await;
+        let client = HttpClient::new(server.url(), Auth::None).unwrap();
+
+        let error = client
+            .paginate_json("projects/example", |page| {
+                let rows = page["values"].as_array().context("missing values")?.clone();
+                let next = page["next"].as_str().map(str::to_owned);
+                Ok((rows, next))
+            })
+            .await
+            .expect_err("repeated pagination endpoints must stop");
+        assert!(error.to_string().contains("repeated endpoint"));
     }
 }

@@ -87,7 +87,6 @@ fn map_http_snapshot(
     branches: Result<Value>,
     pull_requests: Result<Value>,
     reviewers: Result<Value>,
-    issues: Result<Value>,
     pipelines: Result<Value>,
 ) -> RemoteState {
     let (prs, drafts) = match &pull_requests {
@@ -120,7 +119,7 @@ fn map_http_snapshot(
         branches: observe_response(branches, map_branches),
         prs,
         review_requests,
-        issues: observe_response(issues, map_issues),
+        issues: Observation::unsupported(),
         proposals: Observation::success(Vec::new()),
         drafts,
         published: Observation::unsupported(),
@@ -142,25 +141,17 @@ impl RemoteProvider for Bitbucket {
             };
             let repository_path = format!("repositories/{project}");
             let branches_path = format!("{repository_path}/refs/branches");
-            let pull_requests_path = format!("{repository_path}/pullrequests?state=OPEN");
-            let issues_path = format!("{repository_path}/issues");
+            let pull_requests_path =
+                format!("{repository_path}/pullrequests?state=OPEN&fields=%2Bvalues.reviewers");
             let pipelines_path = format!("{repository_path}/pipelines");
-            let (repository, branches, pull_requests, reviewers, issues, pipelines) = tokio::join!(
+            let (repository, branches, pull_requests, reviewers, pipelines) = tokio::join!(
                 client.get_json_value(&repository_path),
                 paginated(&client, &branches_path),
                 paginated(&client, &pull_requests_path),
                 client.get_json_value("user"),
-                paginated(&client, &issues_path),
                 paginated(&client, &pipelines_path),
             );
-            map_http_snapshot(
-                repository,
-                branches,
-                pull_requests,
-                reviewers,
-                issues,
-                pipelines,
-            )
+            map_http_snapshot(repository, branches, pull_requests, reviewers, pipelines)
         })
     }
 }
@@ -301,22 +292,6 @@ fn map_pull_requests(value: &Value) -> Result<PullRequestMappings> {
     Ok(PullRequestMappings { prs, drafts })
 }
 
-pub(crate) fn map_issues(value: &Value) -> Result<Vec<Item>> {
-    Ok(rows(value, "issues")?
-        .iter()
-        .map(|issue| Item {
-            title: format!("#{} {}", identifier(issue, "id"), text(issue, "title")),
-            url: link(issue),
-            detail: ["kind", "priority", "state"]
-                .iter()
-                .map(|key| text(issue, key))
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>()
-                .join(" | "),
-        })
-        .collect())
-}
-
 pub(crate) fn map_pipelines(value: &Value) -> Result<Vec<Item>> {
     Ok(rows(value, "pipelines")?
         .iter()
@@ -364,7 +339,6 @@ pub(crate) fn map_snapshot(
     branches: &Value,
     pull_requests: &Value,
     reviewers: &Value,
-    issues: &Value,
     pipelines: &Value,
 ) -> RemoteState {
     let mappings = map_pull_requests(pull_requests);
@@ -393,10 +367,7 @@ pub(crate) fn map_snapshot(
         },
         prs,
         review_requests,
-        issues: match map_issues(issues) {
-            Ok(items) => Observation::success(items),
-            Err(error) => Observation::failure(error.to_string()),
-        },
+        issues: Observation::unsupported(),
         proposals: Observation::success(Vec::new()),
         drafts,
         published: Observation::unsupported(),
@@ -483,7 +454,6 @@ mod tests {
             "/2.0/repositories/acme/widgets/pullrequests" => {
                 "tests/fixtures/bitbucket/pull_requests.json"
             }
-            "/2.0/repositories/acme/widgets/issues" => "tests/fixtures/bitbucket/issues.json",
             "/2.0/repositories/acme/widgets/pipelines" => "tests/fixtures/bitbucket/pipelines.json",
             "/2.0/user" => "tests/fixtures/bitbucket/reviewers.json",
             _ => return response(404, r#"{"message":"unexpected endpoint"}"#),
@@ -498,14 +468,13 @@ mod tests {
             &fixture("tests/fixtures/bitbucket/branches.json"),
             &fixture("tests/fixtures/bitbucket/pull_requests.json"),
             &fixture("tests/fixtures/bitbucket/reviewers.json"),
-            &fixture("tests/fixtures/bitbucket/issues.json"),
             &fixture("tests/fixtures/bitbucket/pipelines.json"),
         );
         assert_eq!(state.default_branch.data.as_deref(), Some("main"));
         assert_eq!(state.branches.data.as_ref().map(Vec::len), Some(2));
         assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
         assert_eq!(state.review_requests.data.as_ref().map(Vec::len), Some(1));
-        assert_eq!(state.issues.data.as_ref().map(Vec::len), Some(1));
+        assert!(!state.issues.supported);
         assert_eq!(state.drafts.data.as_ref().map(Vec::len), Some(1));
         assert_eq!(state.ci.data.as_ref().map(Vec::len), Some(1));
         assert!(!state.published.supported);
@@ -534,9 +503,6 @@ mod tests {
         let branches = map_branches(&value).unwrap();
         assert_eq!(branches[0].title, "");
         assert_eq!(branches[0].detail, "?");
-        let issues = map_issues(&value).unwrap();
-        assert_eq!(issues[0].title, "#? ");
-        assert_eq!(issues[0].detail, "");
     }
 
     #[test]
@@ -566,22 +532,21 @@ mod tests {
         let state = Bitbucket.snapshot(&test_repo()).await;
 
         assert_eq!(state.default_branch.data.as_deref(), Some("main"));
-        assert_eq!(state.branches.data.as_ref().map(Vec::len), Some(2));
         assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
         assert_eq!(state.review_requests.data.as_ref().map(Vec::len), Some(1));
-        assert_eq!(state.issues.data.as_ref().map(Vec::len), Some(1));
+        assert!(!state.issues.supported);
         assert_eq!(state.ci.data.as_ref().map(Vec::len), Some(1));
         assert!(!state.published.supported);
 
         let actual = seen.lock().unwrap().clone();
-        assert_eq!(actual.len(), 6);
+        assert_eq!(actual.len(), 5);
         assert!(
             actual
                 .iter()
                 .all(|(_, auth)| { auth.as_deref() == Some("Bearer bitbucket-test-token") })
         );
         assert!(actual.iter().any(|(target, _)| {
-            target == "/2.0/repositories/acme/widgets/pullrequests?state=OPEN"
+            target == "/2.0/repositories/acme/widgets/pullrequests?state=OPEN&fields=%2Bvalues.reviewers"
         }));
     }
 
@@ -601,9 +566,6 @@ mod tests {
                     r#"{"values":[{"name":"main","target":{"hash":"a"}}],"next":"/2.0/repositories/acme/widgets/refs/branches?page=2"}"#,
                 );
             }
-            if request.url_path().ends_with("/issues") {
-                return response(500, r#"{"message":"issues unavailable"}"#);
-            }
             fixture_response(request)
         })
         .await;
@@ -613,7 +575,7 @@ mod tests {
         let state = Bitbucket.snapshot(&test_repo()).await;
 
         assert_eq!(state.branches.data.as_ref().map(Vec::len), Some(2));
-        assert!(state.issues.data.is_none());
+        assert!(!state.issues.supported);
         assert_eq!(state.default_branch.data.as_deref(), Some("main"));
         assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
     }
