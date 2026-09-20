@@ -1,6 +1,7 @@
 use super::{
     app::{
-        App, AttentionPriority, CI_FAIL_MARKERS, Mode, RowState, ci_failed_confirmed, known_count,
+        App, AttentionPriority, AuthField, CI_FAIL_MARKERS, Mode, RowState, ci_failed_confirmed,
+        known_count,
     },
     cache::CACHE_PLACEHOLDER,
     keys,
@@ -327,6 +328,88 @@ pub(super) fn help_rect(area: Rect, content_height: u16) -> Rect {
         width,
         height,
     )
+}
+
+fn draw_accounts_modal(frame: &mut Frame, app: &App) {
+    let Mode::Accounts(form) = &app.mode else {
+        return;
+    };
+    let available_width = frame.area().width.saturating_sub(4);
+    let available_height = frame.area().height.saturating_sub(4);
+    let width = 78.min(available_width);
+    let height = 16.min(available_height);
+    if width < 30 || height < 8 {
+        return;
+    }
+    let area = Rect::new(
+        frame.area().x + frame.area().width.saturating_sub(width) / 2,
+        frame.area().y + frame.area().height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let block = Block::bordered()
+        .title(" Provider accounts ")
+        .title_alignment(Alignment::Center)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    let rows = app
+        .auth_accounts
+        .iter()
+        .map(|account| {
+            format!(
+                "{:?}  {}  {}",
+                account.provider,
+                account.host,
+                if account.username.is_empty() {
+                    "configured"
+                } else {
+                    &account.username
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    let token_display = if form.token.is_empty() {
+        "(token hidden)".into()
+    } else {
+        "•".repeat(form.token.chars().count().min(32))
+    };
+    let field = |label: &str, value: &str, active: bool| {
+        Line::from(vec![
+            Span::styled(
+                format!("{label:<9}"),
+                Style::default().fg(if active { Color::Cyan } else { Color::DarkGray }),
+            ),
+            Span::raw(value.to_string()),
+        ])
+    };
+    let mut lines = vec![Line::styled(
+        if rows.is_empty() {
+            "No saved accounts".into()
+        } else {
+            rows.join("\n")
+        },
+        Style::default().fg(Color::DarkGray),
+    )];
+    lines.push(Line::default());
+    lines.push(field(
+        "Provider",
+        &form.provider,
+        form.field == AuthField::Provider,
+    ));
+    lines.push(field("Host", &form.host, form.field == AuthField::Host));
+    lines.push(field(
+        "Token",
+        &token_display,
+        form.field == AuthField::Token,
+    ));
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        "Tab/Shift-Tab fields · Enter save · Esc close",
+        Style::default().fg(Color::DarkGray),
+    ));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn help_lines(groups: &[keys::BindingGroup], app: &App, stack_rows: bool) -> Vec<Line<'static>> {
@@ -878,6 +961,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             clean(&p.repo.path.display().to_string())
         ),
         Mode::Remove(name) => format!("Remove {} from registry only? y / n", clean(name)),
+        Mode::Accounts(_) => "Accounts: Tab fields / Enter save / Esc close".into(),
         Mode::Help { .. } => keys::help_close_hint(),
         Mode::Normal if app.action_busy => format!(
             "{} action running... monitoring remains available",
@@ -903,4 +987,5 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     frame.render_widget(Paragraph::new(footer), areas[4]);
     draw_help_modal(frame, app);
+    draw_accounts_modal(frame, app);
 }

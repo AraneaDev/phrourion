@@ -1361,6 +1361,22 @@ mod tests {
         app
     }
 
+    #[test]
+    fn accounts_mode_uses_safe_defaults_and_masks_tokens() {
+        let mut app = App::new(Vec::new());
+        app.open_accounts();
+        let app::Mode::Accounts(form) = &mut app.mode else {
+            panic!("accounts should open its own mode");
+        };
+        assert_eq!(form.provider, "github");
+        assert_eq!(form.host, "github.com");
+        form.token = "do-not-render".into();
+
+        let buffer = render_app(&mut app, 100, 30);
+        assert!(buffer_contains(&buffer, "Provider accounts"));
+        assert!(!buffer_contains(&buffer, "do-not-render"));
+    }
+
     fn help_scroll(app: &App) -> Option<u16> {
         match &app.mode {
             app::Mode::Help { scroll, .. } => Some(*scroll),
@@ -1472,7 +1488,7 @@ mod tests {
         assert!(buffer_contains(&narrow, "Esc / ? / F1 / q close help"));
         assert_eq!(
             help_scroll(&app),
-            Some(69),
+            Some(71),
             "narrow rendering must store the viewport maximum"
         );
 
