@@ -136,7 +136,11 @@ unavailable rather than silently doing nothing.
   <img src="docs/screenshots/help-modal.svg" alt="Phrourion keyboard help modal with grouped shortcuts" width="840">
 </p>
 
-Use `j`/`k` or Up/Down to select repositories. In details, `h`/`l` and
+Use `j`/`k` or Up/Down to select repositories. Press `w` to open the workspace
+picker; `All` is always the first option. When adding a checkout from a named
+workspace, it is automatically added to that workspace. In the add prompt,
+press Tab to complete directory paths relative to the directory where Phrourion
+was started. In details, `h`/`l` and
 Left/Right move to the previous or next tab, as do Shift-Tab/Tab. Confirmation
 prompts accept `y` or Enter and cancel with `n` or Escape.
 

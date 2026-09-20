@@ -3,6 +3,7 @@ use super::{
     app::{App, AttentionPriority, AuthField, Mode, PendingPreview, RowState},
     cache::save_cache,
     draw::draw,
+    path_input,
 };
 use crate::{
     auth::{self, AuthAccount, CredentialStore, KeyringCredentialStore},
@@ -410,6 +411,7 @@ pub(super) async fn event_loop(
                 }
                 Dispatch::ModeSpecific => {}
             }
+            let workspace_options = app.workspace_options();
             match &mut app.mode {
                 Mode::Add(input) => match key.code {
                     KeyCode::Esc => app.mode = Mode::Normal,
@@ -417,10 +419,24 @@ pub(super) async fn event_loop(
                         input.pop();
                     }
                     KeyCode::Char(c) => input.push(c),
+                    KeyCode::Tab => {
+                        let (path, remote) = input
+                            .split_once('|')
+                            .map(|(p, r)| (p, Some(r)))
+                            .unwrap_or((input.as_str(), None));
+                        if let Some(completed) = path_input::complete_path(path, &app.startup_dir) {
+                            *input = match remote {
+                                Some(remote) => format!("{completed} |{}", remote),
+                                None => completed,
+                            };
+                        }
+                    }
                     KeyCode::Enter => {
                         let input = input.clone();
                         let config = config.to_owned();
                         let tx = tx.clone();
+                        let startup_dir = app.startup_dir.clone();
+                        let workspace = app.active_workspace.clone();
                         app.mode = Mode::Normal;
                         app.action_busy = true;
                         tasks.spawn(async move {
@@ -428,9 +444,13 @@ pub(super) async fn event_loop(
                                 .split_once('|')
                                 .map(|(p, r)| (p.trim(), Some(r.trim())))
                                 .unwrap_or((input.trim(), None));
-                            let result = match registry::entry(Path::new(path), remote, None).await
-                            {
-                                Ok(repo) => registry::add(&config, repo),
+                            let path = path_input::resolve_path(path, &startup_dir);
+                            let result = match registry::entry(&path, remote, None).await {
+                                Ok(repo) => registry::add_with_workspace(
+                                    &config,
+                                    repo,
+                                    workspace.as_deref(),
+                                ),
                                 Err(e) => Err(e),
                             };
                             let _ = tx.send(Message::Added(result));
@@ -454,33 +474,25 @@ pub(super) async fn event_loop(
                     }
                     _ => {}
                 },
-                Mode::Workspace(input) => match key.code {
+                Mode::Workspace(index) => match key.code {
                     KeyCode::Esc => app.mode = Mode::Normal,
-                    KeyCode::Backspace => {
-                        input.pop();
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *index = index.saturating_sub(1);
                     }
-                    KeyCode::Char(c) => input.push(c),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *index = (*index + 1).min(workspace_options.len().saturating_sub(1));
+                    }
                     KeyCode::Enter => {
-                        let name = input.trim().to_string();
-                        let result = if name.eq_ignore_ascii_case("All") || name.is_empty() {
+                        let name = workspace_options[*index].clone();
+                        let result = if name.eq_ignore_ascii_case("All") {
                             registry::set_active_workspace(config, None)
-                        } else if app
-                            .workspaces
-                            .iter()
-                            .any(|workspace| workspace.eq_ignore_ascii_case(&name))
-                        {
-                            registry::set_active_workspace(config, Some(&name))
                         } else {
-                            anyhow::bail!("Unknown workspace: {name}")
+                            registry::set_active_workspace(config, Some(&name))
                         };
                         match result {
                             Ok(()) => {
                                 app.active_workspace =
-                                    if name.is_empty() || name.eq_ignore_ascii_case("All") {
-                                        None
-                                    } else {
-                                        Some(name)
-                                    };
+                                    (!name.eq_ignore_ascii_case("All")).then_some(name);
                                 app.selected = 0;
                             }
                             Err(e) => app.record(e),
@@ -708,7 +720,7 @@ pub(super) async fn event_loop(
                         app.scroll = 0;
                     }
                     KeyCode::Char('/') => app.mode = Mode::Filter,
-                    KeyCode::Char('w') => app.mode = Mode::Workspace(String::new()),
+                    KeyCode::Char('w') => app.mode = Mode::Workspace(app.active_workspace_index()),
                     KeyCode::Char('n') if !app.action_busy => {
                         app.mode = Mode::CreateWorkspace(String::new())
                     }

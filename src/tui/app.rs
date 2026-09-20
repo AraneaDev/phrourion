@@ -3,7 +3,7 @@ use crate::{
     auth::AuthAccount,
     git::{CheckoutPreview, LocalState, PullPreview},
     model::{Observation, ProviderKind, RemoteState, Repo, clean},
-    registry::Registry,
+    registry::{self, Registry},
 };
 use std::time::Instant;
 
@@ -107,7 +107,7 @@ pub(super) enum Mode {
         scroll: u16,
         pending: Box<Option<PendingPreview>>,
     },
-    Workspace(String),
+    Workspace(usize),
     CreateWorkspace(String),
     AddWorkspace(String),
     RemoveWorkspace(String),
@@ -174,6 +174,7 @@ pub struct App {
     pub log: Vec<String>,
     pub workspaces: Vec<String>,
     pub active_workspace: Option<String>,
+    pub startup_dir: std::path::PathBuf,
     pub(super) auth_accounts: Vec<AuthAccount>,
     pub(super) mode: Mode,
     pub(super) action_busy: bool,
@@ -188,6 +189,7 @@ impl App {
     }
 
     pub fn with_registry(data: Registry) -> Self {
+        let startup_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let active_workspace = data.active_workspace.filter(|active| {
             data.workspaces
                 .iter()
@@ -216,10 +218,30 @@ impl App {
             log: Vec::new(),
             workspaces: data.workspaces,
             active_workspace,
+            startup_dir,
             auth_accounts: data.auth_accounts,
             mode: Mode::Normal,
             action_busy: false,
         }
+    }
+
+    pub(super) fn workspace_options(&self) -> Vec<String> {
+        registry::workspace_names(&Registry {
+            workspaces: self.workspaces.clone(),
+            ..Registry::default()
+        })
+    }
+
+    pub(super) fn active_workspace_index(&self) -> usize {
+        let options = self.workspace_options();
+        self.active_workspace
+            .as_deref()
+            .and_then(|active| {
+                options
+                    .iter()
+                    .position(|workspace| workspace.eq_ignore_ascii_case(active))
+            })
+            .unwrap_or(0)
     }
     pub(super) fn open_accounts(&mut self) {
         let account = self.auth_accounts.first();

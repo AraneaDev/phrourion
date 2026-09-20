@@ -132,6 +132,7 @@ const WORKSPACES: &[Binding] = &[
 const INPUT_FIELDS: &[Binding] = &[
     binding("Printable characters", "type"),
     binding("Backspace", "edit"),
+    binding("Tab", "complete paths / cycle fields"),
     binding("Enter", "submit"),
     binding("Esc", "cancel"),
     binding("F1", "open help"),
