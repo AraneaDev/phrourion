@@ -1,11 +1,169 @@
 use crate::{
     model::{Item, Observation, RemoteState, clean},
     provider,
+    provider::{RemoteProvider, SnapshotFuture},
+    provider_http::{Auth, HttpClient},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+const DEFAULT_BASE_URL: &str = "https://api.bitbucket.org/2.0/";
+const TOKEN_ENV: &str = "PHROURION_BITBUCKET_TOKEN";
+const BASE_URL_ENV: &str = "PHROURION_BITBUCKET_BASE_URL";
+
+#[cfg(test)]
+pub(crate) static BITBUCKET_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub struct Bitbucket;
+
+fn http_client() -> Result<HttpClient> {
+    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.into());
+    let auth = std::env::var(TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .map(Auth::Bearer)
+        .unwrap_or(Auth::None);
+    HttpClient::new(&base_url, auth)
+}
+
+fn encoded_project(project: &str) -> Result<String> {
+    let mut parts = project.split('/');
+    let workspace = parts.next().filter(|value| !value.is_empty());
+    let repository = parts.next().filter(|value| !value.is_empty());
+    if workspace.is_none() || repository.is_none() || parts.next().is_some() {
+        bail!("Bitbucket project must be workspace/repository")
+    }
+    Ok(project
+        .split('/')
+        .map(|part| url::form_urlencoded::byte_serialize(part.as_bytes()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+async fn paginated(client: &HttpClient, path: &str) -> Result<Value> {
+    Ok(Value::Array(
+        client
+            .paginate_json(path, |page| {
+                let values = page
+                    .get("values")
+                    .and_then(Value::as_array)
+                    .context("Missing Bitbucket values array")?
+                    .clone();
+                let next = page.get("next").and_then(Value::as_str).map(str::to_owned);
+                Ok((values, next))
+            })
+            .await?,
+    ))
+}
+
+fn failed_snapshot(error: anyhow::Error) -> RemoteState {
+    let error = error.to_string();
+    RemoteState {
+        default_branch: Observation::failure(&error),
+        branches: Observation::failure(&error),
+        prs: Observation::failure(&error),
+        review_requests: Observation::failure(&error),
+        issues: Observation::failure(&error),
+        proposals: Observation::failure(&error),
+        drafts: Observation::failure(&error),
+        published: Observation::unsupported(),
+        ci: Observation::failure(error),
+        publication: Observation::unsupported(),
+    }
+}
+
+fn observe_response<T>(
+    response: Result<Value>,
+    mapper: impl FnOnce(&Value) -> Result<T>,
+) -> Observation<T> {
+    match response.and_then(|value| mapper(&value)) {
+        Ok(value) => Observation::success(value),
+        Err(error) => Observation::failure(error.to_string()),
+    }
+}
+
+fn map_http_snapshot(
+    repository: Result<Value>,
+    branches: Result<Value>,
+    pull_requests: Result<Value>,
+    reviewers: Result<Value>,
+    issues: Result<Value>,
+    pipelines: Result<Value>,
+) -> RemoteState {
+    let (prs, drafts) = match &pull_requests {
+        Ok(value) => match map_pull_requests(value) {
+            Ok(mapped) => (
+                Observation::success(mapped.prs),
+                Observation::success(mapped.drafts),
+            ),
+            Err(error) => {
+                let error = error.to_string();
+                (Observation::failure(&error), Observation::failure(error))
+            }
+        },
+        Err(error) => {
+            let error = error.to_string();
+            (Observation::failure(&error), Observation::failure(error))
+        }
+    };
+    let review_requests = match (pull_requests, reviewers) {
+        (Ok(pull_requests), Ok(reviewers)) => {
+            match matching_reviewer_requests(&pull_requests, &reviewers) {
+                Ok(items) => Observation::success(items),
+                Err(error) => Observation::failure(error.to_string()),
+            }
+        }
+        (Err(error), _) | (_, Err(error)) => Observation::failure(error.to_string()),
+    };
+    RemoteState {
+        default_branch: observe_response(repository, map_repository),
+        branches: observe_response(branches, map_branches),
+        prs,
+        review_requests,
+        issues: observe_response(issues, map_issues),
+        proposals: Observation::success(Vec::new()),
+        drafts,
+        published: Observation::unsupported(),
+        ci: observe_response(pipelines, map_pipelines),
+        publication: Observation::unsupported(),
+    }
+}
+
+impl RemoteProvider for Bitbucket {
+    fn snapshot<'a>(&'a self, repo: &'a crate::model::Repo) -> SnapshotFuture<'a> {
+        Box::pin(async move {
+            let client = match http_client() {
+                Ok(client) => client,
+                Err(error) => return failed_snapshot(error),
+            };
+            let project = match encoded_project(&repo.identity.project) {
+                Ok(project) => project,
+                Err(error) => return failed_snapshot(error),
+            };
+            let repository_path = format!("repositories/{project}");
+            let branches_path = format!("{repository_path}/refs/branches");
+            let pull_requests_path = format!("{repository_path}/pullrequests?state=OPEN");
+            let issues_path = format!("{repository_path}/issues");
+            let pipelines_path = format!("{repository_path}/pipelines");
+            let (repository, branches, pull_requests, reviewers, issues, pipelines) = tokio::join!(
+                client.get_json_value(&repository_path),
+                paginated(&client, &branches_path),
+                paginated(&client, &pull_requests_path),
+                client.get_json_value("user"),
+                paginated(&client, &issues_path),
+                paginated(&client, &pipelines_path),
+            );
+            map_http_snapshot(
+                repository,
+                branches,
+                pull_requests,
+                reviewers,
+                issues,
+                pipelines,
+            )
+        })
+    }
+}
 
 fn text(value: &Value, key: &str) -> String {
     clean(&provider::text(value, key))
@@ -35,6 +193,7 @@ fn rows<'a>(value: &'a Value, endpoint: &str) -> Result<&'a [Value]> {
     value
         .get("values")
         .and_then(Value::as_array)
+        .or_else(|| value.as_array())
         .map(Vec::as_slice)
         .with_context(|| format!("Expected Bitbucket {endpoint} values array"))
 }
@@ -252,7 +411,85 @@ pub(crate) fn map_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::fixture;
+    use crate::{
+        model::{ProviderKind, Remote, Repo},
+        provider::RemoteProvider,
+        test_support::{Request, Response, fixture, response, test_server},
+    };
+    use std::sync::{Arc, Mutex};
+
+    struct EnvVar {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn test_repo() -> Repo {
+        Repo {
+            id: "bitbucket".into(),
+            name: "widgets".into(),
+            path: std::env::temp_dir(),
+            remote: "origin".into(),
+            identity: Remote {
+                kind: ProviderKind::Bitbucket,
+                host: "bitbucket.org".into(),
+                project: "acme/widgets".into(),
+            },
+            enabled: true,
+            release_workflows: vec![],
+            release_labels: vec![],
+            issue_labels: vec![],
+            workspaces: vec![],
+        }
+    }
+
+    fn request_target(request: &Request) -> String {
+        match request.query() {
+            Some(query) => format!("{}?{query}", request.url_path()),
+            None => request.url_path().to_string(),
+        }
+    }
+
+    fn fixture_response(request: &Request) -> Response {
+        let fixture_path = match request.url_path() {
+            "/2.0/repositories/acme/widgets" => "tests/fixtures/bitbucket/repository.json",
+            "/2.0/repositories/acme/widgets/refs/branches" => {
+                "tests/fixtures/bitbucket/branches.json"
+            }
+            "/2.0/repositories/acme/widgets/pullrequests" => {
+                "tests/fixtures/bitbucket/pull_requests.json"
+            }
+            "/2.0/repositories/acme/widgets/issues" => "tests/fixtures/bitbucket/issues.json",
+            "/2.0/repositories/acme/widgets/pipelines" => "tests/fixtures/bitbucket/pipelines.json",
+            "/2.0/user" => "tests/fixtures/bitbucket/reviewers.json",
+            _ => return response(404, r#"{"message":"unexpected endpoint"}"#),
+        };
+        response(200, &fixture(fixture_path).to_string())
+    }
 
     #[test]
     fn bitbucket_fixtures_map_the_neutral_state() {
@@ -308,5 +545,102 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("Bitbucket branches"));
+    }
+
+    #[tokio::test]
+    async fn http_snapshot_fetches_cloud_endpoints_with_bearer_auth() {
+        let _lock = BITBUCKET_ENV_LOCK.lock().await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let handler_seen = Arc::clone(&seen);
+        let server = test_server(move |request| {
+            handler_seen.lock().unwrap().push((
+                request_target(request),
+                request.header("authorization").map(str::to_string),
+            ));
+            fixture_response(request)
+        })
+        .await;
+        let _base = EnvVar::set(BASE_URL_ENV, &format!("{}/2.0/", server.root_url()));
+        let _token = EnvVar::set(TOKEN_ENV, "bitbucket-test-token");
+
+        let state = Bitbucket.snapshot(&test_repo()).await;
+
+        assert_eq!(state.default_branch.data.as_deref(), Some("main"));
+        assert_eq!(state.branches.data.as_ref().map(Vec::len), Some(2));
+        assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
+        assert_eq!(state.review_requests.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(state.issues.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(state.ci.data.as_ref().map(Vec::len), Some(1));
+        assert!(!state.published.supported);
+
+        let actual = seen.lock().unwrap().clone();
+        assert_eq!(actual.len(), 6);
+        assert!(
+            actual
+                .iter()
+                .all(|(_, auth)| { auth.as_deref() == Some("Bearer bitbucket-test-token") })
+        );
+        assert!(actual.iter().any(|(target, _)| {
+            target == "/2.0/repositories/acme/widgets/pullrequests?state=OPEN"
+        }));
+    }
+
+    #[tokio::test]
+    async fn http_snapshot_preserves_siblings_when_an_endpoint_fails() {
+        let _lock = BITBUCKET_ENV_LOCK.lock().await;
+        let server = test_server(|request| {
+            if request.query() == Some("page=2") {
+                return response(
+                    200,
+                    r#"{"values":[{"name":"feature","target":{"hash":"b"}}]}"#,
+                );
+            }
+            if request.url_path().ends_with("/refs/branches") {
+                return response(
+                    200,
+                    r#"{"values":[{"name":"main","target":{"hash":"a"}}],"next":"/2.0/repositories/acme/widgets/refs/branches?page=2"}"#,
+                );
+            }
+            if request.url_path().ends_with("/issues") {
+                return response(500, r#"{"message":"issues unavailable"}"#);
+            }
+            fixture_response(request)
+        })
+        .await;
+        let _base = EnvVar::set(BASE_URL_ENV, &format!("{}/2.0/", server.root_url()));
+        let _token = EnvVar::set(TOKEN_ENV, "bitbucket-test-token");
+
+        let state = Bitbucket.snapshot(&test_repo()).await;
+
+        assert_eq!(state.branches.data.as_ref().map(Vec::len), Some(2));
+        assert!(state.issues.data.is_none());
+        assert_eq!(state.default_branch.data.as_deref(), Some("main"));
+        assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[tokio::test]
+    async fn http_snapshot_without_token_does_not_send_authorization() {
+        let _lock = BITBUCKET_ENV_LOCK.lock().await;
+        let saw_authorization = Arc::new(Mutex::new(false));
+        let handler_saw_authorization = Arc::clone(&saw_authorization);
+        let server = test_server(move |request| {
+            if request.header("authorization").is_some() {
+                *handler_saw_authorization.lock().unwrap() = true;
+            }
+            if request.url_path() == "/2.0/user" {
+                response(401, r#"{"message":"unauthorized"}"#)
+            } else {
+                fixture_response(request)
+            }
+        })
+        .await;
+        let _base = EnvVar::set(BASE_URL_ENV, &format!("{}/2.0/", server.root_url()));
+        let _token = EnvVar::remove(TOKEN_ENV);
+
+        let state = Bitbucket.snapshot(&test_repo()).await;
+
+        assert!(!*saw_authorization.lock().unwrap());
+        assert_eq!(state.default_branch.data.as_deref(), Some("main"));
+        assert!(state.review_requests.error.is_some());
     }
 }
