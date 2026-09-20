@@ -2,7 +2,8 @@
 //! exists for Forgejo, so this talks to the REST API directly.
 
 use crate::{
-    model::{Item, Observation, RemoteState, Repo},
+    auth::{KeyringCredentialStore, resolve_credential},
+    model::{Item, Observation, ProviderKind, RemoteState, Repo},
     provider::{self, RemoteProvider, SnapshotFuture},
 };
 use anyhow::{Context, Result};
@@ -34,17 +35,7 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 }
 
 pub fn env_token_var(host: &str) -> String {
-    let normalized: String = host
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("PHROURION_TOKEN_{normalized}")
+    crate::auth::env_var_for_host(host)
 }
 
 pub(crate) fn base_url(host: &str) -> String {
@@ -74,10 +65,9 @@ pub(crate) async fn get(host: &str, path: &str, query: &[(&str, &str)]) -> Resul
     // An exported-but-empty token (`export PHROURION_TOKEN_X=""`) must fall
     // back to unauthenticated, not send a broken `Authorization: token `
     // header that will likely 401.
-    if let Some(token) = std::env::var(env_token_var(host))
-        .ok()
-        .filter(|t| !t.is_empty())
-    {
+    let credential =
+        resolve_credential(&KeyringCredentialStore, ProviderKind::Forgejo, host, None)?;
+    if let Some(token) = credential.secret() {
         request = request.header("Authorization", format!("token {token}"));
     }
     let response = request.send().await.context("Forgejo request failed")?;
