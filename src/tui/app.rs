@@ -2,7 +2,7 @@ use super::cache::cached;
 use crate::{
     auth::AuthAccount,
     git::{CheckoutPreview, LocalState, PullPreview},
-    model::{Observation, RemoteState, Repo, clean},
+    model::{Observation, ProviderKind, RemoteState, Repo, clean},
     registry::Registry,
 };
 use std::time::Instant;
@@ -133,8 +133,16 @@ impl AuthForm {
     pub(super) fn new(account: Option<&AuthAccount>) -> Self {
         Self {
             provider: account
-                .map(|account| format!("{:?}", account.provider).to_lowercase())
-                .unwrap_or_else(|| "github".into()),
+                .map(|account| match account.provider {
+                    ProviderKind::Github => "github",
+                    ProviderKind::Gitlab => "gitlab",
+                    ProviderKind::Forgejo => "forgejo",
+                    ProviderKind::Bitbucket => "bitbucket",
+                    ProviderKind::BitbucketServer => "bitbucket-server",
+                    ProviderKind::Local => "local",
+                })
+                .unwrap_or("github")
+                .into(),
             host: account
                 .map(|account| account.host.clone())
                 .unwrap_or_else(|| "github.com".into()),
