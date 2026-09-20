@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/AraneaDev/phrourion/compare/v0.7.0...v0.8.0) (2026-09-20)
+
+
+### Features
+
+* add deterministic animated screenshots ([#37](https://github.com/AraneaDev/phrourion/issues/37)) ([a92ee0d](https://github.com/AraneaDev/phrourion/commit/a92ee0d31a85fd36e70cd75d6a7894110461c930))
+
 ## [0.7.0](https://github.com/AraneaDev/phrourion/compare/v0.6.0...v0.7.0) (2026-09-20)
 
 
