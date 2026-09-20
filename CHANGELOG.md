@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/AraneaDev/phrourion/compare/v0.3.3...v0.4.0) (2026-09-19)
+
+
+### Features
+
+* **tui:** add keyboard help modal and keyboard-first controls ([#26](https://github.com/AraneaDev/phrourion/issues/26)) ([ab2ac05](https://github.com/AraneaDev/phrourion/commit/ab2ac054571c780029b7a9995880fb353f4d094a))
+
 ## [0.3.3](https://github.com/AraneaDev/phrourion/compare/v0.3.2...v0.3.3) (2026-09-18)
 
 
