@@ -4,6 +4,7 @@ mod cache;
 mod draw;
 mod event_loop;
 mod keys;
+mod path_input;
 
 pub use app::{App, RowState};
 pub use draw::draw;
@@ -451,6 +452,18 @@ mod tests {
 
         assert_eq!(app.active_workspace, None);
         assert_eq!(app.visible().len(), 2);
+    }
+
+    #[test]
+    fn workspace_picker_lists_all_first_and_selects_the_active_workspace() {
+        let app = App::with_registry(Registry {
+            workspaces: vec!["Zulu".into(), "Alpha".into()],
+            active_workspace: Some("zulu".into()),
+            ..Registry::default()
+        });
+
+        assert_eq!(app.workspace_options(), ["All", "Alpha", "Zulu"]);
+        assert_eq!(app.active_workspace_index(), 2);
     }
 
     #[test]
@@ -1489,7 +1502,7 @@ mod tests {
         assert!(buffer_contains(&narrow, "Esc / ? / F1 / q close help"));
         assert_eq!(
             help_scroll(&app),
-            Some(71),
+            Some(73),
             "narrow rendering must store the viewport maximum"
         );
 

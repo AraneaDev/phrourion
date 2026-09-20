@@ -923,13 +923,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
     let hint = match &app.mode {
         Mode::Add(s) => format!(
-            "Add: PATH | REMOTE (remote optional): {}  [Enter save / Esc cancel]",
+            "Add: PATH | REMOTE (Tab completes): {}  [Enter save / Esc cancel]",
             clean(s)
         ),
         Mode::Filter => "Type filter, Enter done, Esc clear".into(),
-        Mode::Workspace(s) => format!(
-            "Workspace: {}  [Enter select / empty All / Esc cancel]",
-            clean(s)
+        Mode::Workspace(index) => format!(
+            "Workspace: {}  [{}]  [j/k select / Enter switch / Esc cancel]",
+            clean(&app.workspace_options()[*index]),
+            app.workspace_options()
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    if i == *index {
+                        format!("[{}]", name)
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
         ),
         Mode::CreateWorkspace(s) => {
             format!("Create workspace: {}  [Enter save / Esc cancel]", clean(s))

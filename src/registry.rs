@@ -173,9 +173,20 @@ pub async fn entry(path: &Path, remote: Option<&str>, kind: Option<ProviderKind>
 }
 
 pub fn add(config: &Path, repo: Repo) -> Result<()> {
+    add_with_workspace(config, repo, None)
+}
+
+pub fn add_with_workspace(config: &Path, repo: Repo, workspace: Option<&str>) -> Result<()> {
     update(config, |r| {
         if r.repos.iter().any(|x| x.path == repo.path) {
             bail!("Checkout is already registered");
+        }
+        let workspace = workspace
+            .map(|name| find_workspace(r, name).map(str::to_string))
+            .transpose()?;
+        let mut repo = repo;
+        if let Some(workspace) = workspace {
+            repo.workspaces.push(workspace);
         }
         r.repos.push(repo);
         r.repos.sort_by_key(|x| x.name.to_lowercase());
@@ -550,6 +561,20 @@ mod tests {
         remove_from_workspace(&config, "BETA", "one").unwrap();
         remove_from_workspace(&config, "Beta", "one").unwrap();
         assert_eq!(load(&config).unwrap().repos[0].workspaces, ["Alpha"]);
+    }
+
+    #[test]
+    fn adding_a_repo_can_assign_it_to_the_active_workspace_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config/repos.toml");
+        let checkout = dir.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        create_workspace(&config, "Primary").unwrap();
+
+        add_with_workspace(&config, repo("one", "demo", checkout), Some("primary")).unwrap();
+
+        let saved = load(&config).unwrap();
+        assert_eq!(saved.repos[0].workspaces, ["Primary"]);
     }
 
     #[test]
