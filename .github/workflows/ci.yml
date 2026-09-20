@@ -24,9 +24,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install screenshot tools
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y librsvg2-bin imagemagick
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
+      - name: Check generated screenshots
+        run: scripts/check-screenshot.sh
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Test with coverage
         run: scripts/coverage.sh

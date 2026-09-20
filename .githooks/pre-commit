@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-scripts/screenshot.sh "${PHROURION_SCREENSHOT_CONFIG-}" docs/screenshots/dashboard.svg
-scripts/screenshot.sh "${PHROURION_SCREENSHOT_CONFIG-}" docs/screenshots/help-modal.svg help
-git add docs/screenshots/dashboard.svg docs/screenshots/help-modal.svg
+scripts/screenshot.sh "" docs/screenshots/dashboard.gif dashboard
+scripts/screenshot.sh "" docs/screenshots/help-modal.gif help
+git add docs/screenshots/dashboard.gif docs/screenshots/help-modal.gif

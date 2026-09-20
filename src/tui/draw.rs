@@ -556,7 +556,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     .split(frame.area());
     frame.render_widget(
         Paragraph::new(format!(
-            " P H R O U R I O N  |  workspace: {}  |  {} repositories  |  filter: {}",
+            " P H R O U R I O N  v{}  |  workspace: {}  |  {} repositories  |  filter: {}",
+            env!("CARGO_PKG_VERSION"),
             app.active_workspace.as_deref().unwrap_or("All"),
             app.visible().len(),
             clean(&app.filter)

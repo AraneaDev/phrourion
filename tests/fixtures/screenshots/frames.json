@@ -1,0 +1,70 @@
+{
+  "dashboard": [
+    {
+      "label": "loading",
+      "repos": [
+        {"name": "phrourion", "local": null, "remote": {"ci": "loading"}},
+        {"name": "alpheus", "local": null, "remote": {"ci": "loading"}},
+        {"name": "forgejo", "local": null, "remote": {"ci": "loading"}}
+      ]
+    },
+    {
+      "label": "healthy",
+      "repos": [
+        {"name": "phrourion", "local": {"branch": "main", "head": "a1b2c3d", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "alpheus", "local": {"branch": "main", "head": "b2c3d4e", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "forgejo", "local": {"branch": "main", "head": "c3d4e5f", "upstream": "origin/main"}, "remote": {"ci": "pass"}}
+      ]
+    },
+    {
+      "label": "attention",
+      "repos": [
+        {"name": "phrourion", "local": {"branch": "feature/header", "head": "d4e5f6a", "upstream": "origin/feature/header", "modified": 2}, "remote": {"prs": 2, "review_requests": 1, "proposals": 1, "drafts": 1, "ci": "fail"}},
+        {"name": "alpheus", "local": {"branch": "main", "head": "e5f6a7b", "upstream": "origin/main", "behind": 3}, "remote": {"issues": 2, "ci": "pass"}},
+        {"name": "forgejo", "local": {"branch": "main", "head": "f6a7b8c", "upstream": "origin/main"}, "remote": {"prs": 1, "ci": "pass"}}
+      ]
+    },
+    {
+      "label": "recovered",
+      "repos": [
+        {"name": "phrourion", "local": {"branch": "main", "head": "a7b8c9d", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "alpheus", "local": {"branch": "main", "head": "b8c9d0e", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "forgejo", "local": {"branch": "main", "head": "c9d0e1f", "upstream": "origin/main"}, "remote": {"ci": "pass"}}
+      ]
+    }
+  ],
+  "help": [
+    {
+      "label": "help-1",
+      "repos": [
+        {"name": "phrourion", "local": {"branch": "main", "head": "a1b2c3d", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "alpheus", "local": {"branch": "main", "head": "b2c3d4e", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "forgejo", "local": {"branch": "main", "head": "c3d4e5f", "upstream": "origin/main"}, "remote": {"ci": "pass"}}
+      ]
+    },
+    {
+      "label": "help-2",
+      "repos": [
+        {"name": "phrourion", "local": {"branch": "main", "head": "a1b2c3d", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "alpheus", "local": {"branch": "main", "head": "b2c3d4e", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "forgejo", "local": {"branch": "main", "head": "c3d4e5f", "upstream": "origin/main"}, "remote": {"ci": "pass"}}
+      ]
+    },
+    {
+      "label": "help-3",
+      "repos": [
+        {"name": "phrourion", "local": {"branch": "main", "head": "a1b2c3d", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "alpheus", "local": {"branch": "main", "head": "b2c3d4e", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "forgejo", "local": {"branch": "main", "head": "c3d4e5f", "upstream": "origin/main"}, "remote": {"ci": "pass"}}
+      ]
+    },
+    {
+      "label": "help-4",
+      "repos": [
+        {"name": "phrourion", "local": {"branch": "main", "head": "a1b2c3d", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "alpheus", "local": {"branch": "main", "head": "b2c3d4e", "upstream": "origin/main"}, "remote": {"ci": "pass"}},
+        {"name": "forgejo", "local": {"branch": "main", "head": "c3d4e5f", "upstream": "origin/main"}, "remote": {"ci": "pass"}}
+      ]
+    }
+  ]
+}
