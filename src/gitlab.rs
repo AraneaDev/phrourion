@@ -8,14 +8,14 @@ use std::collections::HashSet;
 
 pub struct Gitlab;
 
-pub(crate) fn map_project(value: &Value) -> Result<Observation<String>> {
+pub(crate) fn map_project(value: &Value) -> Result<String> {
     required_text(
         value,
         "path_with_namespace",
         "Missing GitLab project identity",
     )?;
     let default_branch = required_text(value, "default_branch", "Missing GitLab default branch")?;
-    Ok(Observation::success(default_branch.to_string()))
+    Ok(default_branch.to_string())
 }
 
 fn required_text<'a>(value: &'a Value, key: &str, message: &str) -> Result<&'a str> {
@@ -157,8 +157,13 @@ fn release_evidence(value: &Value, configured_labels: &[String]) -> Option<&'sta
 }
 
 fn reviewer_keys(value: &Value) -> Result<HashSet<String>> {
-    Ok(rows(value, "reviewers")?
-        .iter()
+    let reviewers: Vec<_> = match value {
+        Value::Array(reviewers) => reviewers.iter().collect(),
+        Value::Object(_) => vec![value],
+        _ => bail!("Expected GitLab reviewer object or array"),
+    };
+    Ok(reviewers
+        .into_iter()
         .flat_map(|reviewer| {
             [
                 reviewer.get("id").map(Value::to_string),
@@ -189,20 +194,13 @@ fn has_matching_reviewer(value: &Value, reviewer_keys: &HashSet<String>) -> bool
 
 struct MergeRequestMappings {
     prs: Vec<Item>,
-    review_requests: Vec<Item>,
     proposals: Vec<Item>,
     drafts: Vec<Item>,
 }
 
-fn map_merge_requests(
-    value: &Value,
-    reviewers: &Value,
-    release_labels: &[String],
-) -> Result<MergeRequestMappings> {
-    let reviewer_keys = reviewer_keys(reviewers)?;
+fn map_merge_requests(value: &Value, release_labels: &[String]) -> Result<MergeRequestMappings> {
     let mut mapped = MergeRequestMappings {
         prs: Vec::new(),
-        review_requests: Vec::new(),
         proposals: Vec::new(),
         drafts: Vec::new(),
     };
@@ -216,9 +214,6 @@ fn map_merge_requests(
         if merge_request["draft"] == true {
             mapped.drafts.push(item.clone());
         }
-        if has_matching_reviewer(merge_request, &reviewer_keys) {
-            mapped.review_requests.push(item.clone());
-        }
         if let Some(evidence) = release_evidence(merge_request, release_labels) {
             let mut proposal = item;
             proposal.detail = format!("{evidence} | {}", proposal.detail);
@@ -226,6 +221,20 @@ fn map_merge_requests(
         }
     }
     Ok(mapped)
+}
+
+fn map_review_requests(value: &Value, reviewer: &Value) -> Result<Vec<Item>> {
+    let reviewer_keys = reviewer_keys(reviewer)?;
+    Ok(rows(value, "merge requests")?
+        .iter()
+        .filter(|value| {
+            value["state"]
+                .as_str()
+                .is_none_or(|state| state == "opened")
+        })
+        .filter(|merge_request| has_matching_reviewer(merge_request, &reviewer_keys))
+        .map(merge_request_item)
+        .collect())
 }
 
 fn matches_labels(value: &Value, configured_labels: &[String]) -> bool {
@@ -274,6 +283,13 @@ pub(crate) fn map_pipelines(value: &Value) -> Result<Vec<Item>> {
         .collect())
 }
 
+fn observe<T>(result: Result<T>) -> Observation<T> {
+    match result {
+        Ok(data) => Observation::success(data),
+        Err(error) => Observation::failure(error),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn map_snapshot(
     repo: &Repo,
@@ -284,20 +300,34 @@ pub(crate) fn map_snapshot(
     releases: &Value,
     reviewers: &Value,
     pipelines: &Value,
-) -> Result<RemoteState> {
-    let merge_requests = map_merge_requests(merge_requests, reviewers, &repo.release_labels)?;
-    Ok(RemoteState {
-        default_branch: map_project(project)?,
-        branches: Observation::success(map_branches(branches)?),
-        prs: Observation::success(merge_requests.prs),
-        review_requests: Observation::success(merge_requests.review_requests),
-        issues: Observation::success(map_issues(issues, &repo.issue_labels)?),
-        proposals: Observation::success(merge_requests.proposals),
-        drafts: Observation::success(merge_requests.drafts),
-        published: Observation::success(map_releases(releases)?),
-        ci: Observation::success(map_pipelines(pipelines)?),
+) -> RemoteState {
+    let (prs, proposals, drafts) = match map_merge_requests(merge_requests, &repo.release_labels) {
+        Ok(mapped) => (
+            Observation::success(mapped.prs),
+            Observation::success(mapped.proposals),
+            Observation::success(mapped.drafts),
+        ),
+        Err(error) => {
+            let error = error.to_string();
+            (
+                Observation::failure(&error),
+                Observation::failure(&error),
+                Observation::failure(error),
+            )
+        }
+    };
+    RemoteState {
+        default_branch: observe(map_project(project)),
+        branches: observe(map_branches(branches)),
+        prs,
+        review_requests: observe(map_review_requests(merge_requests, reviewers)),
+        issues: observe(map_issues(issues, &repo.issue_labels)),
+        proposals,
+        drafts,
+        published: observe(map_releases(releases)),
+        ci: observe(map_pipelines(pipelines)),
         publication: Observation::unsupported(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -328,7 +358,7 @@ mod tests {
         }
     }
 
-    fn complete_snapshot() -> anyhow::Result<crate::model::RemoteState> {
+    fn complete_snapshot() -> crate::model::RemoteState {
         map_snapshot(
             &test_repo(),
             &fixture("tests/fixtures/gitlab/project.json"),
@@ -343,7 +373,7 @@ mod tests {
 
     #[test]
     fn project_maps_default_branch_and_urls() {
-        let state = complete_snapshot().expect("fixtures should map");
+        let state = complete_snapshot();
 
         assert_eq!(state.default_branch.data.as_deref(), Some("main"));
         let branches = state.branches.data.expect("branches should be observed");
@@ -389,7 +419,7 @@ mod tests {
 
     #[test]
     fn merge_requests_map_open_drafts_reviewers_and_release_evidence() {
-        let state = complete_snapshot().expect("fixtures should map");
+        let state = complete_snapshot();
         let prs = state.prs.data.expect("merge requests should be observed");
         assert_eq!(prs.len(), 2);
         assert_eq!(prs[0].title, "!7 Add widget support");
@@ -428,6 +458,23 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_user_object_selects_matching_review_requests() {
+        let merge_requests = fixture("tests/fixtures/gitlab/merge_requests.json");
+        let authenticated_user = json!({
+            "id": 501,
+            "username": "reviewer",
+            "name": "Rhea Viewer",
+            "web_url": "https://gitlab.example/reviewer"
+        });
+
+        let mapped = map_review_requests(&merge_requests, &authenticated_user)
+            .expect("GitLab GET /user object should map");
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].title, "!7 Add widget support");
+    }
+
+    #[test]
     fn missing_optional_fields_do_not_fail_the_snapshot() {
         let value = fixture("tests/fixtures/gitlab/missing_optional_fields.json");
         let state = map_snapshot(
@@ -439,8 +486,7 @@ mod tests {
             &value["releases"],
             &value["reviewers"],
             &value["pipelines"],
-        )
-        .expect("optional display fields should use tolerant defaults");
+        );
 
         assert_eq!(state.default_branch.data.as_deref(), Some("main"));
         assert_eq!(state.branches.data.as_ref().unwrap()[0].detail, "?");
@@ -454,6 +500,32 @@ mod tests {
         assert!(state.drafts.data.as_ref().unwrap().is_empty());
         assert_eq!(state.published.data.as_ref().unwrap()[0].url, "");
         assert_eq!(state.ci.data.as_ref().unwrap()[0].title, "pipeline #?");
+        assert!(!state.publication.supported);
+    }
+
+    #[test]
+    fn malformed_endpoint_fails_only_its_observation() {
+        let state = map_snapshot(
+            &test_repo(),
+            &fixture("tests/fixtures/gitlab/project.json"),
+            &json!({"message": "malformed branches"}),
+            &fixture("tests/fixtures/gitlab/merge_requests.json"),
+            &fixture("tests/fixtures/gitlab/issues.json"),
+            &fixture("tests/fixtures/gitlab/releases.json"),
+            &fixture("tests/fixtures/gitlab/reviewers.json"),
+            &fixture("tests/fixtures/gitlab/pipelines.json"),
+        );
+
+        assert_eq!(state.default_branch.data.as_deref(), Some("main"));
+        assert_eq!(
+            state.branches.error.as_deref(),
+            Some("Expected GitLab branches array")
+        );
+        assert!(state.branches.data.is_none());
+        assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
+        assert_eq!(state.issues.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(state.published.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(state.ci.data.as_ref().map(Vec::len), Some(1));
         assert!(!state.publication.supported);
     }
 
