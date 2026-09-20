@@ -96,7 +96,7 @@ impl ScreenshotFixture {
 }
 
 impl ScreenshotFrame {
-    fn app(&self) -> tui::App {
+    fn app_for_mode(&self, mode: ScreenshotMode, frame_index: usize) -> tui::App {
         let _frame_label = &self.label;
         let repos = self
             .repos
@@ -129,6 +129,9 @@ impl ScreenshotFrame {
                 .map(|state| Observation::success(state.local_state()))
                 .unwrap_or_default();
             row.remote = fixture_repo.remote.remote_state();
+        }
+        if mode == ScreenshotMode::Help && frame_index > 0 {
+            app.open_help();
         }
         app
     }
@@ -274,10 +277,9 @@ async fn main() -> Result<()> {
         let mode = ScreenshotMode::parse(&args[1])?;
         let frame_index: usize = args[3].parse().context("Frame index must be an integer")?;
         let fixture = load_fixture()?;
-        let mut app = fixture.frame(mode, frame_index)?.app();
-        if mode == ScreenshotMode::Help {
-            app.open_help();
-        }
+        let app = fixture
+            .frame(mode, frame_index)?
+            .app_for_mode(mode, frame_index);
         (PathBuf::from(&args[4]), app, false)
     } else {
         let mut positional = args.into_iter();
@@ -356,7 +358,7 @@ mod tests {
             let mut app = fixture
                 .frame(ScreenshotMode::Dashboard, index)
                 .unwrap()
-                .app();
+                .app_for_mode(ScreenshotMode::Dashboard, index);
             let mut terminal = Terminal::new(TestBackend::new(140, 42)).unwrap();
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             terminal
@@ -377,6 +379,29 @@ mod tests {
         assert!(healthy.contains("ACTION: all clear"));
         assert!(attention.contains("CI failed"));
         assert!(recovered.contains("ACTION: all clear"));
+    }
+
+    #[test]
+    fn help_frames_start_closed_then_show_the_modal() {
+        let fixture = load_fixture().unwrap();
+        let render = |index| {
+            let mut app = fixture
+                .frame(ScreenshotMode::Help, index)
+                .unwrap()
+                .app_for_mode(ScreenshotMode::Help, index);
+            let mut terminal = Terminal::new(TestBackend::new(140, 42)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        assert!(!render(0).contains("Keyboard help"));
+        assert!(render(1).contains("Keyboard help"));
     }
 
     #[test]
