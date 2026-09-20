@@ -1,7 +1,8 @@
 use super::cache::cached;
 use crate::{
+    auth::AuthAccount,
     git::{CheckoutPreview, LocalState, PullPreview},
-    model::{Observation, RemoteState, Repo, clean},
+    model::{Observation, ProviderKind, RemoteState, Repo, clean},
     registry::Registry,
 };
 use std::time::Instant;
@@ -110,6 +111,53 @@ pub(super) enum Mode {
     CreateWorkspace(String),
     AddWorkspace(String),
     RemoveWorkspace(String),
+    Accounts(AuthForm),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AuthField {
+    Provider,
+    Host,
+    Token,
+}
+
+#[derive(Clone)]
+pub(super) struct AuthForm {
+    pub provider: String,
+    pub host: String,
+    pub token: String,
+    pub field: AuthField,
+}
+
+impl AuthForm {
+    pub(super) fn new(account: Option<&AuthAccount>) -> Self {
+        Self {
+            provider: account
+                .map(|account| match account.provider {
+                    ProviderKind::Github => "github",
+                    ProviderKind::Gitlab => "gitlab",
+                    ProviderKind::Forgejo => "forgejo",
+                    ProviderKind::Bitbucket => "bitbucket",
+                    ProviderKind::BitbucketServer => "bitbucket-server",
+                    ProviderKind::Local => "local",
+                })
+                .unwrap_or("github")
+                .into(),
+            host: account
+                .map(|account| account.host.clone())
+                .unwrap_or_else(|| "github.com".into()),
+            token: String::new(),
+            field: AuthField::Provider,
+        }
+    }
+
+    pub(super) fn input_mut(&mut self) -> &mut String {
+        match self.field {
+            AuthField::Provider => &mut self.provider,
+            AuthField::Host => &mut self.host,
+            AuthField::Token => &mut self.token,
+        }
+    }
 }
 
 pub(super) enum PendingPreview {
@@ -126,6 +174,7 @@ pub struct App {
     pub log: Vec<String>,
     pub workspaces: Vec<String>,
     pub active_workspace: Option<String>,
+    pub(super) auth_accounts: Vec<AuthAccount>,
     pub(super) mode: Mode,
     pub(super) action_busy: bool,
 }
@@ -167,9 +216,14 @@ impl App {
             log: Vec::new(),
             workspaces: data.workspaces,
             active_workspace,
+            auth_accounts: data.auth_accounts,
             mode: Mode::Normal,
             action_busy: false,
         }
+    }
+    pub(super) fn open_accounts(&mut self) {
+        let account = self.auth_accounts.first();
+        self.mode = Mode::Accounts(AuthForm::new(account));
     }
     pub fn open_help(&mut self) {
         if matches!(self.mode, Mode::Help { .. }) {

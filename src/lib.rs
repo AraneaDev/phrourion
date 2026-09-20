@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+pub mod auth;
+#[allow(dead_code)]
 pub mod bitbucket;
 pub mod command;
 pub mod forgejo;
@@ -82,12 +84,21 @@ pub(crate) mod test_support {
     pub(crate) struct Response {
         status: u16,
         body: String,
+        headers: Vec<(String, String)>,
     }
 
     pub(crate) fn response(status: u16, body: &str) -> Response {
         Response {
             status,
             body: body.into(),
+            headers: Vec::new(),
+        }
+    }
+
+    impl Response {
+        pub(crate) fn header(mut self, name: &str, value: &str) -> Self {
+            self.headers.push((name.into(), value.into()));
+            self
         }
     }
 
@@ -250,8 +261,13 @@ pub(crate) mod test_support {
             500 => "Internal Server Error",
             _ => "Response",
         };
+        let headers = response
+            .headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
         let payload = format!(
-            "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{}",
             response.status,
             response.body.len(),
             response.body

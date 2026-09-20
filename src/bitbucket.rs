@@ -1,5 +1,6 @@
 use crate::{
-    model::{Item, Observation, RemoteState, clean},
+    auth::{KeyringCredentialStore, resolve_credential},
+    model::{Item, Observation, ProviderKind, RemoteState, clean},
     provider,
     provider::{RemoteProvider, SnapshotFuture},
     provider_http::{Auth, HttpClient},
@@ -16,12 +17,19 @@ pub(crate) static BITBUCKET_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mute
 
 pub struct Bitbucket;
 
-fn http_client() -> Result<HttpClient> {
-    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.into());
-    let auth = std::env::var(TOKEN_ENV)
-        .ok()
-        .filter(|token| !token.is_empty())
-        .map(Auth::Bearer)
+fn http_client(host: &str) -> Result<HttpClient> {
+    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| {
+        if host == "bitbucket.org" {
+            DEFAULT_BASE_URL.into()
+        } else {
+            format!("https://{host}/2.0/")
+        }
+    });
+    let resolved =
+        resolve_credential(&KeyringCredentialStore, ProviderKind::Bitbucket, host, None)?;
+    let auth = resolved
+        .secret()
+        .map(|token| Auth::Bearer(token.into()))
         .unwrap_or(Auth::None);
     HttpClient::new(&base_url, auth)
 }
@@ -131,7 +139,7 @@ fn map_http_snapshot(
 impl RemoteProvider for Bitbucket {
     fn snapshot<'a>(&'a self, repo: &'a crate::model::Repo) -> SnapshotFuture<'a> {
         Box::pin(async move {
-            let client = match http_client() {
+            let client = match http_client(&repo.identity.host) {
                 Ok(client) => client,
                 Err(error) => return failed_snapshot(error),
             };

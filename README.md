@@ -28,8 +28,9 @@
 
 **TL;DR:** Phrourion is a terminal dashboard for local repository state, remote
 branches, pull requests, checks, and releases. It reads local Git directly and
-uses provider adapters for remote data, starting with GitHub through the
-authenticated `gh` CLI. A user-level registry lets you add checkouts without
+uses provider adapters for remote data. GitHub works through either a personal
+access token or the authenticated `gh` CLI; Forgejo, GitLab, and Bitbucket use
+the same account setup. A user-level registry lets you add checkouts without
 writing configuration into them.
 
 It is for the moment before you start work and the moment before you commit.
@@ -39,10 +40,9 @@ is open upstream, and whether a release is waiting for attention.
 ## Status
 
 > **Status:** pre-release. GitHub, Forgejo, GitLab, and Bitbucket Cloud monitoring
-> and the safe fast-forward pull path are ready. Phrourion requires Rust 1.85 or newer; GitHub monitoring
-> requires an authenticated [GitHub CLI](https://cli.github.com/), and Forgejo
-> monitoring requires a personal access token in a `PHROURION_TOKEN_<HOST>`
-> environment variable (optional for public repositories).
+> and the safe fast-forward pull path are ready. Phrourion requires Rust 1.85 or newer.
+> Provider authentication works through the CLI, the TUI Accounts modal, an OS
+> keyring, or environment variables. See [provider authentication](docs/providers.md).
 
 ## What it shows
 
@@ -66,8 +66,8 @@ visible with its stale state while a refresh is retried.
 Local observations use Git commands in the registered checkout. Remote
 observations use a provider adapter with a neutral result model, so the TUI does
 not need to know whether data came from GitHub, GitLab, Bitbucket, or Forgejo.
-The GitHub adapter calls `gh api` and validates paginated responses before using
-them.
+GitHub uses a direct API token when one is configured and otherwise falls back
+to `gh api`. All adapters validate provider responses before using them.
 
 The registry lives outside the repositories at
 `$XDG_CONFIG_HOME/phrourion/repos.toml`, or the platform configuration directory
@@ -120,6 +120,7 @@ are the dashboard’s main shortcuts:
 | Repository | `a`, `d`, `c`, `p` | Add, remove, check out a PR, or pull |
 | Repository | `r` / `R` | Refresh selected / all repositories |
 | Repository | `o`, `t`, `/` | Open remote, open terminal, or filter |
+| Accounts | `s` | Open provider account setup |
 | Workspaces | `w`, `n`, `m` / `u` | Select, create, add, or remove membership |
 | Prompts | `y` / Enter, `n` / Esc | Confirm or cancel |
 | Help | `?` / `F1` | Open the full keyboard reference |
@@ -178,22 +179,21 @@ cargo install --path . --locked --bin phro --bin phrourion --force
 
 Run the same command again to update an existing installation.
 
-Authenticate the GitHub CLI if remote GitHub data is wanted:
+The simplest interactive setup is the Accounts modal: start `phro`, press `s`,
+enter the provider, host, and token, then press Enter. Tokens are masked and
+stored in the operating system keyring; they are not written to `repos.toml`.
+The same operation is available non-interactively:
 
 ```bash
-gh auth login
+printf '%s\n' "$TOKEN" | phro auth set --provider github --host github.com --token-stdin
+phro auth list
+phro auth test --host github.com --provider github
 ```
 
-For a self-hosted or Codeberg Forgejo instance, monitoring a private repository
-requires a personal access token in an environment variable named after the
-host: uppercase it and replace every non-alphanumeric character with `_`, then
-prefix with `PHROURION_TOKEN_`. For example, `codeberg.org` becomes
-`PHROURION_TOKEN_CODEBERG_ORG`. Public repositories work without a token. Only
-`codeberg.org` is auto-detected as a Forgejo host; any other self-hosted
-Forgejo instance must be registered with `--provider forgejo` explicitly. The
-Forgejo adapter uses `rustls` with the bundled Mozilla root store, so a
-self-hosted instance behind a private/internal CA certificate isn't supported
-yet.
+For headless environments, set an environment variable instead. Environment
+credentials override keyring credentials and are never saved by Phrourion. The
+full provider matrix, token scopes, self-hosted examples, and troubleshooting
+are in [docs/providers.md](docs/providers.md).
 
 ## Use
 

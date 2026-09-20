@@ -1,12 +1,13 @@
 use super::{
     animation::exit_screen,
-    app::{App, AttentionPriority, Mode, PendingPreview, RowState},
+    app::{App, AttentionPriority, AuthField, Mode, PendingPreview, RowState},
     cache::save_cache,
     draw::draw,
 };
 use crate::{
+    auth::{self, AuthAccount, CredentialStore, KeyringCredentialStore},
     git::{self, CheckoutPreview, LocalState, PullPreview},
-    model::{Observation, RemoteState, clean},
+    model::{Observation, ProviderKind, RemoteState, clean},
     provider, registry,
 };
 use anyhow::Result;
@@ -172,7 +173,8 @@ fn key_context(mode: &Mode) -> KeyContext {
         | Mode::Workspace(_)
         | Mode::CreateWorkspace(_)
         | Mode::AddWorkspace(_)
-        | Mode::RemoveWorkspace(_) => KeyContext::TextInput,
+        | Mode::RemoveWorkspace(_)
+        | Mode::Accounts(_) => KeyContext::TextInput,
         Mode::Confirm(_) | Mode::ConfirmCheckout(_) | Mode::Remove(_) => KeyContext::Confirmation,
         Mode::Help { .. } => KeyContext::Help,
     }
@@ -252,6 +254,7 @@ fn reload_registry(app: &mut App, data: registry::Registry) {
     let fresh = App::with_registry(data);
     app.workspaces = fresh.workspaces;
     app.active_workspace = fresh.active_workspace;
+    app.auth_accounts = fresh.auth_accounts;
     let new_rows = fresh.rows;
     app.update_rows(|rows| {
         let old: HashMap<_, _> = rows.drain(..).map(|r| (r.repo.id.clone(), r)).collect();
@@ -540,6 +543,89 @@ pub(super) async fn event_loop(
                     }
                     _ => {}
                 },
+                Mode::Accounts(form) => match key.code {
+                    KeyCode::Esc => app.mode = Mode::Normal,
+                    KeyCode::Tab | KeyCode::Right => {
+                        form.field = match form.field {
+                            AuthField::Provider => AuthField::Host,
+                            AuthField::Host => AuthField::Token,
+                            AuthField::Token => AuthField::Provider,
+                        }
+                    }
+                    KeyCode::BackTab | KeyCode::Left => {
+                        form.field = match form.field {
+                            AuthField::Provider => AuthField::Token,
+                            AuthField::Host => AuthField::Provider,
+                            AuthField::Token => AuthField::Host,
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        form.input_mut().pop();
+                    }
+                    KeyCode::Char(character) => form.input_mut().push(character),
+                    KeyCode::Enter if form.field != AuthField::Token => {
+                        form.field = match form.field {
+                            AuthField::Provider => AuthField::Host,
+                            AuthField::Host => AuthField::Token,
+                            AuthField::Token => unreachable!(),
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let provider = match form.provider.trim() {
+                            "github" => Some(ProviderKind::Github),
+                            "gitlab" => Some(ProviderKind::Gitlab),
+                            "bitbucket" => Some(ProviderKind::Bitbucket),
+                            "bitbucket-server" => Some(ProviderKind::BitbucketServer),
+                            "forgejo" => Some(ProviderKind::Forgejo),
+                            _ => None,
+                        };
+                        if let Some(provider) = provider {
+                            if form.host.trim().is_empty() || form.token.trim().is_empty() {
+                                app.record("Provider, host, and token are required");
+                                continue;
+                            }
+                            let host = form.host.trim().to_ascii_lowercase();
+                            let result = (|| -> Result<()> {
+                                let existing = registry::load(config)?;
+                                auth::remove_replaced_credential(
+                                    &KeyringCredentialStore,
+                                    &existing.auth_accounts,
+                                    &provider,
+                                    &host,
+                                )?;
+                                KeyringCredentialStore.set(
+                                    provider.clone(),
+                                    &host,
+                                    form.token.trim(),
+                                )?;
+                                registry::update(config, |data| {
+                                    data.auth_accounts.retain(|account| {
+                                        !account.host.eq_ignore_ascii_case(&host)
+                                    });
+                                    data.auth_accounts.push(AuthAccount {
+                                        provider,
+                                        host,
+                                        label: String::new(),
+                                        username: String::new(),
+                                    });
+                                    Ok(())
+                                })?;
+                                Ok(())
+                            })();
+                            match result {
+                                Ok(()) => {
+                                    reload_registry(app, registry::load(config)?);
+                                    app.mode = Mode::Normal;
+                                    app.record("Provider credential saved");
+                                }
+                                Err(error) => app.record(error),
+                            }
+                        } else {
+                            app.record("Provider must be github, gitlab, bitbucket, bitbucket-server, or forgejo");
+                        }
+                    }
+                    _ => {}
+                },
                 Mode::Confirm(preview) => match key.code {
                     _ if accepts_confirmation(key) => {
                         let preview = preview.clone();
@@ -633,6 +719,7 @@ pub(super) async fn event_loop(
                         app.mode = Mode::RemoveWorkspace(String::new())
                     }
                     KeyCode::Char('a') if !app.action_busy => app.mode = Mode::Add(String::new()),
+                    KeyCode::Char('s') if !app.action_busy => app.open_accounts(),
                     KeyCode::Char('d') if !app.action_busy => {
                         if let Some(i) = app.current() {
                             app.mode = Mode::Remove(app.rows[i].repo.id.clone());

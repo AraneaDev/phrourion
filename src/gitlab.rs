@@ -1,5 +1,6 @@
 use crate::{
-    model::{Item, Observation, RemoteState, Repo, clean},
+    auth::{KeyringCredentialStore, resolve_credential},
+    model::{Item, Observation, ProviderKind, RemoteState, Repo, clean},
     provider::{self, RemoteProvider, SnapshotFuture},
     provider_http::{Auth, HttpClient},
 };
@@ -18,12 +19,18 @@ pub(crate) static GITLAB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::
 
 pub struct Gitlab;
 
-fn http_client() -> Result<HttpClient> {
-    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.into());
-    let auth = std::env::var(TOKEN_ENV)
-        .ok()
-        .filter(|token| !token.is_empty())
-        .map(Auth::Bearer)
+fn http_client(host: &str) -> Result<HttpClient> {
+    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| {
+        if host == "gitlab.com" {
+            DEFAULT_BASE_URL.into()
+        } else {
+            format!("https://{host}/api/v4/")
+        }
+    });
+    let resolved = resolve_credential(&KeyringCredentialStore, ProviderKind::Gitlab, host, None)?;
+    let auth = resolved
+        .secret()
+        .map(|token| Auth::Bearer(token.into()))
         .unwrap_or(Auth::None);
     HttpClient::new(&base_url, auth)
 }
@@ -469,7 +476,7 @@ fn failed_snapshot(error: anyhow::Error) -> RemoteState {
 impl RemoteProvider for Gitlab {
     fn snapshot<'a>(&'a self, repo: &'a Repo) -> SnapshotFuture<'a> {
         Box::pin(async move {
-            let client = match http_client() {
+            let client = match http_client(&repo.identity.host) {
                 Ok(client) => client,
                 Err(error) => return failed_snapshot(error),
             };

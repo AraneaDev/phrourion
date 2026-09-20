@@ -1,7 +1,15 @@
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
-use phrourion::{git, model::ProviderKind, provider, registry, terminal, tui};
-use std::path::PathBuf;
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use phrourion::{
+    auth::{self, CredentialSource, CredentialStore, KeyringCredentialStore},
+    git,
+    model::ProviderKind,
+    provider, registry, terminal, tui,
+};
+use std::{
+    io::{IsTerminal, Read},
+    path::PathBuf,
+};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -71,6 +79,42 @@ enum Action {
     },
     /// Open a registered repository in a new terminal.
     OpenTerminal { name: String },
+    /// Manage provider credentials.
+    Auth {
+        #[command(subcommand)]
+        command: AuthAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthAction {
+    /// List configured provider hosts and effective credential sources.
+    List,
+    /// Save a token in the OS keyring. Read it from stdin without echoing.
+    Set {
+        #[arg(long, value_enum)]
+        provider: Kind,
+        #[arg(long)]
+        host: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        token_stdin: bool,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Test a configured credential against its provider identity endpoint.
+    Test {
+        #[arg(long)]
+        host: String,
+        #[arg(long, value_enum)]
+        provider: Option<Kind>,
+    },
+    /// Remove a saved credential and its non-secret metadata.
+    Remove {
+        #[arg(long)]
+        host: String,
+        #[arg(long, value_enum)]
+        provider: Option<Kind>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,6 +151,32 @@ fn repo_workspace_labels(repo: &phrourion::model::Repo) -> String {
     } else {
         repo.workspaces.join(",")
     }
+}
+
+fn provider_name(provider: &ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Github => "github",
+        ProviderKind::Gitlab => "gitlab",
+        ProviderKind::Bitbucket => "bitbucket",
+        ProviderKind::BitbucketServer => "bitbucket-server",
+        ProviderKind::Forgejo => "forgejo",
+        ProviderKind::Local => "local",
+    }
+}
+
+fn find_auth_provider(
+    data: &registry::Registry,
+    host: &str,
+    provider: Option<Kind>,
+) -> Result<ProviderKind> {
+    if let Some(provider) = provider {
+        return Ok(provider.into());
+    }
+    data.auth_accounts
+        .iter()
+        .find(|account| account.host.eq_ignore_ascii_case(host))
+        .map(|account| account.provider.clone())
+        .ok_or_else(|| anyhow::anyhow!("No configured provider for host {host}; pass --provider"))
 }
 
 #[tokio::main]
@@ -234,6 +304,108 @@ async fn main() -> Result<()> {
                 for repo in registry::repos_in_workspace(&data, workspace) {
                     println!("{}\t{}", repo.name, repo.path.display());
                 }
+            }
+        },
+        Some(Action::Auth { command }) => match command {
+            AuthAction::List => {
+                let data = registry::load(&config)?;
+                let store = KeyringCredentialStore;
+                for account in data.auth_accounts {
+                    let resolved = auth::resolve_credential(
+                        &store,
+                        account.provider.clone(),
+                        &account.host,
+                        None,
+                    )?;
+                    let source = match resolved.source() {
+                        CredentialSource::Environment => "environment",
+                        CredentialSource::Keyring => "keyring",
+                        CredentialSource::Gh => "gh",
+                        CredentialSource::Anonymous => "anonymous",
+                    };
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        provider_name(&account.provider),
+                        account.host,
+                        if account.label.is_empty() {
+                            "-"
+                        } else {
+                            &account.label
+                        },
+                        source
+                    );
+                }
+            }
+            AuthAction::Set {
+                provider,
+                host,
+                token_stdin,
+                label,
+            } => {
+                if !token_stdin {
+                    bail!("Pass --token-stdin so the token is not exposed in process arguments");
+                }
+                let provider: ProviderKind = provider.into();
+                if provider == ProviderKind::Local {
+                    bail!("Local repositories do not have provider credentials");
+                }
+                if std::io::stdin().is_terminal() {
+                    bail!(
+                        "--token-stdin requires piped input; refusing to read an echoed terminal"
+                    );
+                }
+                let mut token = String::new();
+                std::io::stdin().read_to_string(&mut token)?;
+                let token = token.trim().to_string();
+                let store = KeyringCredentialStore;
+                let existing = registry::load(&config)?;
+                auth::remove_replaced_credential(
+                    &store,
+                    &existing.auth_accounts,
+                    &provider,
+                    &host,
+                )?;
+                store.set(provider.clone(), &host, &token)?;
+                registry::update(&config, |data| {
+                    data.auth_accounts
+                        .retain(|account| !account.host.eq_ignore_ascii_case(&host));
+                    data.auth_accounts.push(auth::AuthAccount {
+                        provider: provider.clone(),
+                        host: host.to_ascii_lowercase(),
+                        label: label.unwrap_or_default(),
+                        username: String::new(),
+                    });
+                    data.auth_accounts
+                        .sort_by_key(|account| account.host.clone());
+                    Ok(())
+                })?;
+                println!("Saved {} credential for {}", provider_name(&provider), host);
+            }
+            AuthAction::Test { host, provider } => {
+                let data = registry::load(&config)?;
+                let provider = find_auth_provider(&data, &host, provider)?;
+                let username = auth::test_connection(provider.clone(), &host).await?;
+                println!(
+                    "Authenticated as {username} on {} ({})",
+                    host,
+                    provider_name(&provider)
+                );
+            }
+            AuthAction::Remove { host, provider } => {
+                let data = registry::load(&config)?;
+                let provider = find_auth_provider(&data, &host, provider)?;
+                KeyringCredentialStore.remove(provider.clone(), &host)?;
+                registry::update(&config, |data| {
+                    data.auth_accounts.retain(|account| {
+                        !(account.provider == provider && account.host.eq_ignore_ascii_case(&host))
+                    });
+                    Ok(())
+                })?;
+                println!(
+                    "Removed {} credential for {}",
+                    provider_name(&provider),
+                    host
+                );
             }
         },
         Some(Action::OpenTerminal { name }) => {

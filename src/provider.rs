@@ -1,7 +1,9 @@
 //! Hosting adapters return neutral records. No hosting-specific types reach the UI.
 use crate::{
+    auth::{KeyringCredentialStore, resolve_credential},
     command,
     model::{Item, Observation, ProviderKind, RemoteState, Repo},
+    provider_http::{Auth, HttpClient},
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -68,7 +70,7 @@ fn is_rate_limited(error: &str) -> bool {
     lower.contains("rate limit") || lower.contains("http 429")
 }
 
-async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
+async fn gh_api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
     let executable = std::env::var("PHROURION_GH").unwrap_or_else(|_| "gh".into());
     let mut args = vec![
         "api",
@@ -94,6 +96,43 @@ async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
             Err(e) => return Err(e),
         }
     }
+}
+
+async fn http_api(client: &HttpClient, endpoint: &str, pages: bool) -> Result<Value> {
+    if pages {
+        Ok(Value::Array(
+            client.paginate_json_link_header(endpoint).await?,
+        ))
+    } else {
+        Ok(client.get_json_value(endpoint).await?)
+    }
+}
+
+fn github_base_url(host: &str) -> String {
+    std::env::var("PHROURION_GITHUB_BASE_URL").unwrap_or_else(|_| {
+        if host == "github.com" {
+            "https://api.github.com/".into()
+        } else {
+            format!("https://{host}/api/v3/")
+        }
+    })
+}
+
+async fn api(repo: &Repo, endpoint: &str, pages: bool) -> Result<Value> {
+    let credential = resolve_credential(
+        &KeyringCredentialStore,
+        ProviderKind::Github,
+        &repo.identity.host,
+        None,
+    )?;
+    if let Some(token) = credential.secret() {
+        let client = HttpClient::new(
+            &github_base_url(&repo.identity.host),
+            Auth::Bearer(token.into()),
+        )?;
+        return http_api(&client, endpoint, pages).await;
+    }
+    gh_api(repo, endpoint, pages).await
 }
 
 pub fn flatten_pages(value: Value, key: Option<&str>) -> Result<Vec<Value>> {
@@ -866,6 +905,68 @@ mod tests {
         // RATE_LIMIT_ATTEMPTS = 3: exactly 3 attempts — neither a premature
         // give-up nor an infinite retry loop.
         assert_eq!(std::fs::read_to_string(&counter).unwrap().trim(), "3");
+    }
+
+    #[tokio::test]
+    async fn api_uses_github_http_token_without_gh() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let server = crate::test_support::test_server(|request| {
+            assert_eq!(request.header("authorization"), Some("Bearer github-token"));
+            assert_eq!(request.path(), "/user");
+            crate::test_support::response(200, r#"{"login":"octocat"}"#)
+        })
+        .await;
+        let previous_token = std::env::var("PHROURION_GITHUB_TOKEN").ok();
+        let previous_base = std::env::var("PHROURION_GITHUB_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("PHROURION_GITHUB_TOKEN", "github-token");
+            std::env::set_var("PHROURION_GITHUB_BASE_URL", server.root_url());
+        }
+        let value = api(&test_repo(), "user", false).await.unwrap();
+        unsafe {
+            match previous_token {
+                Some(value) => std::env::set_var("PHROURION_GITHUB_TOKEN", value),
+                None => std::env::remove_var("PHROURION_GITHUB_TOKEN"),
+            }
+            match previous_base {
+                Some(value) => std::env::set_var("PHROURION_GITHUB_BASE_URL", value),
+                None => std::env::remove_var("PHROURION_GITHUB_BASE_URL"),
+            }
+        }
+        assert_eq!(value["login"], "octocat");
+    }
+
+    #[tokio::test]
+    async fn github_http_api_follows_link_header_pagination() {
+        let _guard = GH_ENV_LOCK.lock().await;
+        let server = crate::test_support::test_server(|request| {
+            assert_eq!(request.header("authorization"), Some("Bearer github-token"));
+            match request.path() {
+                "/items" => crate::test_support::response(200, r#"[{"id":1}]"#)
+                    .header("Link", "</items?page=2>; rel=\"next\""),
+                "/items?page=2" => crate::test_support::response(200, r#"[{"id":2}]"#),
+                path => panic!("unexpected GitHub endpoint {path}"),
+            }
+        })
+        .await;
+        let previous_token = std::env::var("PHROURION_GITHUB_TOKEN").ok();
+        let previous_base = std::env::var("PHROURION_GITHUB_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("PHROURION_GITHUB_TOKEN", "github-token");
+            std::env::set_var("PHROURION_GITHUB_BASE_URL", server.root_url());
+        }
+        let value = api(&test_repo(), "items", true).await.unwrap();
+        unsafe {
+            match previous_token {
+                Some(value) => std::env::set_var("PHROURION_GITHUB_TOKEN", value),
+                None => std::env::remove_var("PHROURION_GITHUB_TOKEN"),
+            }
+            match previous_base {
+                Some(value) => std::env::set_var("PHROURION_GITHUB_BASE_URL", value),
+                None => std::env::remove_var("PHROURION_GITHUB_BASE_URL"),
+            }
+        }
+        assert_eq!(flatten_pages(value, None).unwrap().len(), 2);
     }
 
     #[tokio::test]

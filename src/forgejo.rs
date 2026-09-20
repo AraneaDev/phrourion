@@ -2,13 +2,15 @@
 //! exists for Forgejo, so this talks to the REST API directly.
 
 use crate::{
-    model::{Item, Observation, RemoteState, Repo},
+    auth::{KeyringCredentialStore, resolve_credential},
+    model::{Item, Observation, ProviderKind, RemoteState, Repo},
     provider::{self, RemoteProvider, SnapshotFuture},
+    provider_http::{Auth, HttpClient},
 };
 use anyhow::{Context, Result};
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 use serde_json::Value;
-use std::{fmt, sync::OnceLock, time::Duration};
+use std::fmt;
 
 // Carries the HTTP status alongside the message so callers can distinguish a
 // disabled repo feature (404 on /pulls, /releases, /issues) from a real
@@ -34,17 +36,7 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 }
 
 pub fn env_token_var(host: &str) -> String {
-    let normalized: String = host
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("PHROURION_TOKEN_{normalized}")
+    crate::auth::env_var_for_host(host)
 }
 
 pub(crate) fn base_url(host: &str) -> String {
@@ -53,60 +45,31 @@ pub(crate) fn base_url(host: &str) -> String {
     format!("{root}/api/v1")
 }
 
-pub(crate) fn client() -> &'static Client {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        // A hung host (dead reverse proxy, half-open connection) must not be
-        // able to block a request forever: each remote snapshot runs under a
-        // shared 4-permit semaphore (see src/tui.rs), so an indefinitely
-        // pending request would permanently occupy one of those slots. Mirror
-        // the 45-second budget `src/command.rs::run` gives `gh` subprocesses.
-        Client::builder()
-            .timeout(Duration::from_secs(45))
-            .build()
-            .unwrap_or_default()
-    })
-}
-
 pub(crate) async fn get(host: &str, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-    let url = format!("{}/{path}", base_url(host));
-    let mut request = client().get(&url).query(query);
-    // An exported-but-empty token (`export PHROURION_TOKEN_X=""`) must fall
-    // back to unauthenticated, not send a broken `Authorization: token `
-    // header that will likely 401.
-    if let Some(token) = std::env::var(env_token_var(host))
-        .ok()
-        .filter(|t| !t.is_empty())
-    {
-        request = request.header("Authorization", format!("token {token}"));
-    }
-    let response = request.send().await.context("Forgejo request failed")?;
-    let status = response.status();
-    let body = response
-        .text()
+    let endpoint = if query.is_empty() {
+        path.to_string()
+    } else {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.extend_pairs(query.iter().copied());
+        format!("{path}?{}", serializer.finish())
+    };
+    let credential =
+        resolve_credential(&KeyringCredentialStore, ProviderKind::Forgejo, host, None)?;
+    let auth = credential
+        .secret()
+        .map(|token| Auth::Token(token.into()))
+        .unwrap_or(Auth::None);
+    match HttpClient::new(&base_url(host), auth)?
+        .get_json_value(&endpoint)
         .await
-        .context("Failed to read Forgejo response body")?;
-    if status.is_success() {
-        return serde_json::from_str(&body)
-            .with_context(|| format!("Invalid Forgejo JSON ({status})"));
+    {
+        Err(error) if error.to_string().contains("HTTP 404 Not Found") => Err(HttpError {
+            status: StatusCode::NOT_FOUND,
+            message: error.to_string(),
+        }
+        .into()),
+        result => result,
     }
-    // A non-2xx response isn't guaranteed to be JSON at all (a misconfigured
-    // reverse proxy can return an HTML error page, or plain text). Surface as
-    // much of the actual body as possible instead of a generic parse error,
-    // since this is exactly the detail someone needs when a newly registered
-    // host isn't working.
-    let message = serde_json::from_str::<Value>(&body)
-        .ok()
-        .and_then(|v| v["message"].as_str().map(str::to_string))
-        .unwrap_or_else(|| {
-            let snippet: String = body.chars().take(200).collect();
-            if snippet.is_empty() {
-                "<empty body>".to_string()
-            } else {
-                snippet
-            }
-        });
-    Err(HttpError { status, message }.into())
 }
 
 // `Ok(None)` means the endpoint 404'd on the first page — Forgejo/Gitea
@@ -374,11 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn client_is_cached_across_calls() {
-        assert!(std::ptr::eq(client(), client()));
-    }
-
-    #[test]
     fn http_error_display_includes_status_and_message() {
         let err = HttpError {
             status: StatusCode::NOT_FOUND,
@@ -513,7 +471,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_sends_the_bearer_token_only_when_it_is_non_empty() {
+    async fn get_sends_the_token_only_when_it_is_non_empty() {
         let _guard = ENV_LOCK.lock().await;
         let host = "mock";
         let var = env_token_var(host);
@@ -563,6 +521,25 @@ mod tests {
         assert!(without_token.is_none());
     }
 
+    #[tokio::test]
+    async fn credentialed_public_http_is_rejected_before_sending() {
+        let _guard = ENV_LOCK.lock().await;
+        let host = "forge.example";
+        let var = env_token_var(host);
+        let previous_token = std::env::var(&var).ok();
+        unsafe {
+            std::env::set_var(&var, "s3cr3t");
+        }
+        let result = with_test_url("http://example.com", get(host, "user", &[])).await;
+        unsafe {
+            match previous_token {
+                Some(value) => std::env::set_var(&var, value),
+                None => std::env::remove_var(&var),
+            }
+        }
+        assert!(result.unwrap_err().to_string().contains("require HTTPS"));
+    }
+
     #[test]
     fn not_found_is_detected_only_for_a_404_http_error() {
         let not_found: anyhow::Error = HttpError {
@@ -587,11 +564,11 @@ mod tests {
     fn env_token_var_uppercases_the_host_and_replaces_non_alphanumerics() {
         assert_eq!(
             env_token_var("codeberg.org"),
-            "PHROURION_TOKEN_CODEBERG_ORG"
+            "PHROURION_TOKEN_CODEBERG_2EORG"
         );
         assert_eq!(
             env_token_var("forge.example.com:3000"),
-            "PHROURION_TOKEN_FORGE_EXAMPLE_COM_3000"
+            "PHROURION_TOKEN_FORGE_2EEXAMPLE_2ECOM_3A3000"
         );
     }
 
