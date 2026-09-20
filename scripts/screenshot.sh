@@ -50,10 +50,15 @@ for ((frame = 0; frame < frame_count; frame++)); do
   rsvg-convert "$svg" -o "$png"
 done
 
+package_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+render_fingerprint=$(sha256sum "$temporary"/frame-*.svg | cut -d' ' -f1 | sha256sum | cut -d' ' -f1)
+
 if [[ -n $output ]]; then
   mkdir -p "$(dirname "$output")"
 fi
 generated="$temporary/output.gif"
-"$image_tool" -delay 100 -loop 0 "$temporary"/frame-*.png "$generated"
+"$image_tool" -delay 100 -loop 0 "$temporary"/frame-*.png \
+  -set comment "Phrourion v${package_version} render-${render_fingerprint}" \
+  "$generated"
 mv "$generated" "$output"
 echo "Wrote $output"
