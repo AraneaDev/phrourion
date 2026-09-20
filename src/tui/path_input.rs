@@ -1,24 +1,3 @@
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn completion_resolves_relative_directory_names_from_startup_directory() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("Nemesis-MCP")).unwrap();
-        fs::create_dir(root.path().join("Other-MCP")).unwrap();
-
-        assert_eq!(
-            complete_path("Nem", root.path()),
-            Some("Nemesis-MCP/".into())
-        );
-        assert_eq!(
-            resolve_path("Nemesis-MCP", root.path()),
-            root.path().join("Nemesis-MCP")
-        );
-    }
-}
 use std::path::{Path, PathBuf};
 
 pub(super) fn resolve_path(input: &str, startup_dir: &Path) -> PathBuf {
@@ -58,4 +37,26 @@ pub(super) fn complete_path(input: &str, startup_dir: &Path) -> Option<String> {
     let mut completed = typed_parent.join(candidate);
     completed.push("");
     Some(completed.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn completion_resolves_relative_directory_names_from_startup_directory() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("Nemesis-MCP")).unwrap();
+        fs::create_dir(root.path().join("Other-MCP")).unwrap();
+
+        assert_eq!(
+            complete_path("Nem", root.path()),
+            Some("Nemesis-MCP/".into())
+        );
+        assert_eq!(
+            resolve_path("Nemesis-MCP", root.path()),
+            root.path().join("Nemesis-MCP")
+        );
+    }
 }
