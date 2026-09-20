@@ -423,6 +423,7 @@ mod tests {
             repos: vec![alpha, beta],
             workspaces: vec!["Primary".into(), "Other".into()],
             active_workspace: Some("Primary".into()),
+            auth_accounts: Vec::new(),
         });
 
         assert_eq!(app.visible().len(), 1);
@@ -445,6 +446,7 @@ mod tests {
             repos: vec![alpha, beta],
             workspaces: vec!["Primary".into(), "Other".into()],
             active_workspace: Some("Missing".into()),
+            auth_accounts: Vec::new(),
         });
 
         assert_eq!(app.active_workspace, None);

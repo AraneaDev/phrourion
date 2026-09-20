@@ -1,4 +1,5 @@
 use crate::{
+    auth::AuthAccount,
     git,
     model::{ProviderKind, Remote, Repo},
 };
@@ -19,6 +20,8 @@ pub struct Registry {
     pub workspaces: Vec<String>,
     #[serde(default)]
     pub active_workspace: Option<String>,
+    #[serde(default)]
+    pub auth_accounts: Vec<AuthAccount>,
 }
 
 pub fn config_path() -> Result<PathBuf> {
@@ -473,6 +476,7 @@ mod tests {
             }],
             workspaces: vec!["Primary".into()],
             active_workspace: Some("Primary".into()),
+            auth_accounts: Vec::new(),
         };
 
         let text = toml::to_string_pretty(&registry).unwrap();
@@ -627,6 +631,7 @@ mod tests {
             ],
             workspaces: vec!["Alpha".into(), "Beta".into()],
             active_workspace: None,
+            auth_accounts: Vec::new(),
         };
 
         assert_eq!(workspace_names(&registry), ["All", "Alpha", "Beta"]);

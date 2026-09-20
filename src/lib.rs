@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+pub mod auth;
+#[allow(dead_code)]
 pub mod bitbucket;
 pub mod command;
 pub mod forgejo;
