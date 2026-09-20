@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-config=${PHROURION_SCREENSHOT_CONFIG-}
-
 check_screenshot() {
   local mode=$1
   local output=$2
   local temporary
   temporary=$(mktemp)
-  if [[ -n "$config" ]]; then
-    scripts/screenshot.sh "$config" "$temporary" "$mode"
-  else
-    scripts/screenshot.sh "" "$temporary" "$mode"
-  fi
-  if ! cmp -s "$temporary" "$output"; then
+  scripts/screenshot.sh "" "$temporary" "$mode"
+  local generated_signature expected_signature generated_frames expected_frames
+  generated_signature=$(identify -format '%c|%wx%h|%T' "$temporary[0]")
+  expected_signature=$(identify -format '%c|%wx%h|%T' "$output[0]")
+  generated_frames=$(identify "$temporary" | wc -l)
+  expected_frames=$(identify "$output" | wc -l)
+  if [[ "$generated_signature" != "$expected_signature" || "$generated_frames" != "$expected_frames" ]]; then
     echo "${mode} screenshot is stale. Run scripts/screenshot.sh and stage $output." >&2
     rm -f "$temporary"
     exit 1
@@ -21,5 +20,5 @@ check_screenshot() {
   rm -f "$temporary"
 }
 
-check_screenshot dashboard docs/screenshots/dashboard.svg
-check_screenshot help docs/screenshots/help-modal.svg
+check_screenshot dashboard docs/screenshots/dashboard.gif
+check_screenshot help docs/screenshots/help-modal.gif

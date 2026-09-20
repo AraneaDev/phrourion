@@ -567,6 +567,18 @@ mod tests {
             assert!(!top.contains("Aranea Development"));
         }
     }
+
+    #[test]
+    fn header_shows_app_version() {
+        let mut app = App::new(Vec::new());
+        let buffer = render_app(&mut app, 140, 30);
+
+        assert!(buffer_contains(
+            &buffer,
+            concat!("P H R O U R I O N  v", env!("CARGO_PKG_VERSION"))
+        ));
+    }
+
     #[test]
     fn error_counts_never_look_like_zero() {
         let o: Observation<Vec<String>> = Observation::failure("denied");
