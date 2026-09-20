@@ -152,6 +152,9 @@ pub(crate) mod test_support {
             while !listener_shutdown.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .expect("failed to set test server client read timeout");
                         let handler = Arc::clone(&handler);
                         workers.push(thread::spawn(move || serve_request(stream, handler)));
                     }
@@ -166,7 +169,7 @@ pub(crate) mod test_support {
             }
         });
         TestServer {
-            root_url: format!("http://{address}/"),
+            root_url: format!("http://{address}"),
             url: format!("http://{address}/api/v1/"),
             shutdown,
             thread: Some(thread),
@@ -256,7 +259,7 @@ pub(crate) mod test_support {
     mod tests {
         use super::{fixture, mock_server, response, test_server};
         use serde_json::json;
-        use std::net::TcpStream;
+        use std::{io::Write as _, net::TcpStream, sync::mpsc, thread, time::Duration};
 
         #[test]
         fn fixture_loads_json_relative_to_the_crate_root() {
@@ -309,6 +312,38 @@ pub(crate) mod test_support {
             assert!(
                 TcpStream::connect(address).is_err(),
                 "the listener must be closed when its server handle is dropped"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_server_drop_completes_with_an_incomplete_client_request() {
+            let server = test_server(|_| response(200, "{}")).await;
+            let url = reqwest::Url::parse(server.url()).unwrap();
+            let address = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+            let mut incomplete_client = TcpStream::connect(address).unwrap();
+            incomplete_client
+                .write_all(b"GET /stalled HTTP/1.1\r\nHost: localhost\r\n")
+                .unwrap();
+
+            // A completed request proves the accept loop has already spawned
+            // the worker that is blocked on the earlier incomplete request.
+            let response = reqwest::get(format!("{}ready", server.url()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+            let (dropped_tx, dropped_rx) = mpsc::channel();
+            let drop_thread = thread::spawn(move || {
+                drop(server);
+                dropped_tx.send(()).unwrap();
+            });
+            let completed = dropped_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+
+            drop(incomplete_client);
+            drop_thread.join().unwrap();
+            assert!(
+                completed,
+                "dropping the server must not wait indefinitely for incomplete requests"
             );
         }
 

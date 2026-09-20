@@ -402,6 +402,7 @@ mod tests {
             .await
             .expect("mock server returned 200 with valid JSON");
         assert_eq!(value["hello"], "world");
+        assert_eq!(server.next_request().url_path(), "/api/v1/anything");
     }
 
     #[tokio::test]
