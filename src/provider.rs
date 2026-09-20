@@ -17,6 +17,7 @@ pub fn adapter(kind: &ProviderKind) -> Box<dyn RemoteProvider> {
     match kind {
         ProviderKind::Github => Box::new(Github),
         ProviderKind::Forgejo => Box::new(crate::forgejo::Forgejo),
+        ProviderKind::Gitlab => Box::new(crate::gitlab::Gitlab),
         _ => Box::new(Unsupported),
     }
 }
@@ -707,8 +708,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_dispatches_github_and_forgejo_and_falls_back_to_unsupported() {
+    async fn adapter_dispatches_supported_providers_and_falls_back_to_unsupported() {
         let _forgejo_guard = crate::test_support::FORGEJO_ENV_LOCK.lock().await;
+        let _gitlab_guard = crate::gitlab::GITLAB_ENV_LOCK.lock().await;
         let _gh_guard = GH_ENV_LOCK.lock().await;
         let repo = test_repo();
 
@@ -740,6 +742,18 @@ mod tests {
             }
         }
 
+        let previous_gitlab_url = std::env::var("PHROURION_GITLAB_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("PHROURION_GITLAB_BASE_URL", "http://127.0.0.1:1/api/v4/");
+        }
+        let gitlab_state = adapter(&ProviderKind::Gitlab).snapshot(&repo).await;
+        unsafe {
+            match &previous_gitlab_url {
+                Some(value) => std::env::set_var("PHROURION_GITLAB_BASE_URL", value),
+                None => std::env::remove_var("PHROURION_GITLAB_BASE_URL"),
+            }
+        }
+
         let unsupported_state = adapter(&ProviderKind::Local).snapshot(&repo).await;
 
         // Unsupported never attempts anything: every field is the disabled
@@ -762,6 +776,8 @@ mod tests {
 
         assert!(forgejo_state.default_branch.supported);
         assert!(forgejo_state.default_branch.error.is_some());
+        assert!(gitlab_state.default_branch.supported);
+        assert!(gitlab_state.default_branch.error.is_some());
     }
 
     #[tokio::test]

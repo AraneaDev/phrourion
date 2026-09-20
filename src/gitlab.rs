@@ -1,12 +1,61 @@
 use crate::{
     model::{Item, Observation, RemoteState, Repo, clean},
-    provider,
+    provider::{self, RemoteProvider, SnapshotFuture},
+    provider_http::{Auth, HttpClient},
 };
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::HashSet;
 
+const DEFAULT_BASE_URL: &str = "https://gitlab.com/api/v4/";
+const TOKEN_ENV: &str = "PHROURION_GITLAB_TOKEN";
+const BASE_URL_ENV: &str = "PHROURION_GITLAB_BASE_URL";
+const PAGE_SIZE: usize = 100;
+
+#[cfg(test)]
+pub(crate) static GITLAB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub struct Gitlab;
+
+fn http_client() -> Result<HttpClient> {
+    let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.into());
+    let auth = std::env::var(TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .map(Auth::Bearer)
+        .unwrap_or(Auth::None);
+    HttpClient::new(&base_url, auth)
+}
+
+fn encoded_project(project: &str) -> String {
+    url::form_urlencoded::byte_serialize(project.as_bytes()).collect()
+}
+
+fn paginated_endpoint(path: &str, query: &[(&str, &str)], page: usize) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.extend_pairs(query.iter().copied());
+    serializer.append_pair("per_page", &PAGE_SIZE.to_string());
+    serializer.append_pair("page", &page.to_string());
+    format!("{path}?{}", serializer.finish())
+}
+
+async fn paginated(client: &HttpClient, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+    let mut rows = Vec::new();
+    let mut page = 1;
+    loop {
+        let endpoint = paginated_endpoint(path, query, page);
+        let value = client.get_json_value(&endpoint).await?;
+        let batch = value
+            .as_array()
+            .with_context(|| format!("Expected GitLab array from endpoint '{endpoint}'"))?;
+        let count = batch.len();
+        rows.extend(batch.iter().cloned());
+        if count < PAGE_SIZE {
+            return Ok(Value::Array(rows));
+        }
+        page += 1;
+    }
+}
 
 pub(crate) fn map_project(value: &Value) -> Result<String> {
     required_text(
@@ -330,14 +379,208 @@ pub(crate) fn map_snapshot(
     }
 }
 
+fn observe_response<T>(
+    response: Result<Value>,
+    mapper: impl FnOnce(&Value) -> Result<T>,
+) -> Observation<T> {
+    observe(response.and_then(|value| mapper(&value)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_http_snapshot(
+    repo: &Repo,
+    project: Result<Value>,
+    branches: Result<Value>,
+    merge_requests: Result<Value>,
+    issues: Result<Value>,
+    releases: Result<Value>,
+    reviewer: Result<Value>,
+    pipelines: Result<Value>,
+) -> RemoteState {
+    let (prs, review_requests, proposals, drafts) = match merge_requests {
+        Ok(merge_requests) => match map_merge_requests(&merge_requests, &repo.release_labels) {
+            Ok(mapped) => {
+                let review_requests = match reviewer {
+                    Ok(reviewer) => observe(map_review_requests(&merge_requests, &reviewer)),
+                    Err(error) => Observation::failure(error),
+                };
+                (
+                    Observation::success(mapped.prs),
+                    review_requests,
+                    Observation::success(mapped.proposals),
+                    Observation::success(mapped.drafts),
+                )
+            }
+            Err(error) => {
+                let error = error.to_string();
+                (
+                    Observation::failure(&error),
+                    Observation::failure(&error),
+                    Observation::failure(&error),
+                    Observation::failure(error),
+                )
+            }
+        },
+        Err(error) => {
+            let error = error.to_string();
+            (
+                Observation::failure(&error),
+                Observation::failure(&error),
+                Observation::failure(&error),
+                Observation::failure(error),
+            )
+        }
+    };
+
+    RemoteState {
+        default_branch: observe_response(project, map_project),
+        branches: observe_response(branches, map_branches),
+        prs,
+        review_requests,
+        issues: observe_response(issues, |value| map_issues(value, &repo.issue_labels)),
+        proposals,
+        drafts,
+        published: observe_response(releases, map_releases),
+        ci: observe_response(pipelines, map_pipelines),
+        publication: Observation::unsupported(),
+    }
+}
+
+fn failed_snapshot(error: anyhow::Error) -> RemoteState {
+    let error = error.to_string();
+    RemoteState {
+        default_branch: Observation::failure(&error),
+        branches: Observation::failure(&error),
+        prs: Observation::failure(&error),
+        review_requests: Observation::failure(&error),
+        issues: Observation::failure(&error),
+        proposals: Observation::failure(&error),
+        drafts: Observation::failure(&error),
+        published: Observation::failure(&error),
+        ci: Observation::failure(error),
+        publication: Observation::unsupported(),
+    }
+}
+
+impl RemoteProvider for Gitlab {
+    fn snapshot<'a>(&'a self, repo: &'a Repo) -> SnapshotFuture<'a> {
+        Box::pin(async move {
+            let client = match http_client() {
+                Ok(client) => client,
+                Err(error) => return failed_snapshot(error),
+            };
+            let project = encoded_project(&repo.identity.project);
+            let project_path = format!("projects/{project}");
+            let branches_path = format!("{project_path}/repository/branches");
+            let merge_requests_path = format!("{project_path}/merge_requests");
+            let issues_path = format!("{project_path}/issues");
+            let releases_path = format!("{project_path}/releases");
+            let pipelines_path = format!("{project_path}/pipelines");
+
+            let (project, branches, merge_requests, issues, releases, reviewer, pipelines) = tokio::join!(
+                client.get_json_value(&project_path),
+                paginated(&client, &branches_path, &[]),
+                paginated(&client, &merge_requests_path, &[("state", "opened")]),
+                paginated(&client, &issues_path, &[("state", "opened")]),
+                paginated(&client, &releases_path, &[]),
+                client.get_json_value("user"),
+                paginated(&client, &pipelines_path, &[]),
+            );
+
+            map_http_snapshot(
+                repo,
+                project,
+                branches,
+                merge_requests,
+                issues,
+                releases,
+                reviewer,
+                pipelines,
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         model::{ProviderKind, Remote, Repo},
-        test_support::fixture,
+        provider::RemoteProvider,
+        test_support::{Request, Response, fixture, response, test_server},
     };
     use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    struct EnvVar {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn http_repo(project: &str) -> Repo {
+        Repo {
+            identity: Remote {
+                kind: ProviderKind::Gitlab,
+                host: "gitlab.com".into(),
+                project: project.into(),
+            },
+            ..test_repo()
+        }
+    }
+
+    fn fixture_response(request: &Request, project: &str) -> Response {
+        let path = request.url_path();
+        let fixture_path = if path == format!("/api/v4/projects/{project}") {
+            "tests/fixtures/gitlab/project.json"
+        } else if path == format!("/api/v4/projects/{project}/repository/branches") {
+            "tests/fixtures/gitlab/branches.json"
+        } else if path == format!("/api/v4/projects/{project}/merge_requests") {
+            "tests/fixtures/gitlab/merge_requests.json"
+        } else if path == format!("/api/v4/projects/{project}/issues") {
+            "tests/fixtures/gitlab/issues.json"
+        } else if path == format!("/api/v4/projects/{project}/releases") {
+            "tests/fixtures/gitlab/releases.json"
+        } else if path == "/api/v4/user" {
+            "tests/fixtures/gitlab/reviewers.json"
+        } else if path == format!("/api/v4/projects/{project}/pipelines") {
+            "tests/fixtures/gitlab/pipelines.json"
+        } else {
+            return response(404, r#"{"message":"unexpected endpoint"}"#);
+        };
+        response(200, &fixture(fixture_path).to_string())
+    }
+
+    fn request_target(request: &Request) -> String {
+        match request.query() {
+            Some(query) => format!("{}?{query}", request.url_path()),
+            None => request.url_path().to_string(),
+        }
+    }
 
     fn test_repo() -> Repo {
         Repo {
@@ -542,5 +785,181 @@ mod tests {
                 .to_string(),
             "Missing GitLab default branch"
         );
+    }
+
+    #[tokio::test]
+    async fn http_snapshot_fetches_every_endpoint_with_auth_and_nested_project_encoding() {
+        let _lock = GITLAB_ENV_LOCK.lock().await;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let handler_seen = Arc::clone(&seen);
+        let server = test_server(move |request| {
+            handler_seen.lock().unwrap().push((
+                request_target(request),
+                request.header("authorization").map(str::to_string),
+            ));
+            fixture_response(request, "group%2Fsubgroup%2Frepo")
+        })
+        .await;
+        let _base = EnvVar::set(BASE_URL_ENV, &format!("{}/api/v4/", server.root_url()));
+        let _token = EnvVar::set(TOKEN_ENV, "gitlab-test-token");
+
+        let state = Gitlab.snapshot(&http_repo("group/subgroup/repo")).await;
+
+        assert_eq!(state.default_branch.data.as_deref(), Some("main"));
+        assert_eq!(state.branches.data.as_ref().map(Vec::len), Some(2));
+        assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
+        assert_eq!(state.review_requests.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(state.issues.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(state.published.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(state.ci.data.as_ref().map(Vec::len), Some(1));
+        assert!(!state.publication.supported);
+
+        let mut actual = seen.lock().unwrap().clone();
+        actual.sort();
+        let mut expected = [
+            "/api/v4/projects/group%2Fsubgroup%2Frepo".to_string(),
+            "/api/v4/projects/group%2Fsubgroup%2Frepo/issues?state=opened&per_page=100&page=1"
+                .to_string(),
+            "/api/v4/projects/group%2Fsubgroup%2Frepo/merge_requests?state=opened&per_page=100&page=1"
+                .to_string(),
+            "/api/v4/projects/group%2Fsubgroup%2Frepo/pipelines?per_page=100&page=1"
+                .to_string(),
+            "/api/v4/projects/group%2Fsubgroup%2Frepo/releases?per_page=100&page=1"
+                .to_string(),
+            "/api/v4/projects/group%2Fsubgroup%2Frepo/repository/branches?per_page=100&page=1"
+                .to_string(),
+            "/api/v4/user".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(
+            actual.iter().map(|(target, _)| target).collect::<Vec<_>>(),
+            expected.iter().collect::<Vec<_>>()
+        );
+        assert!(
+            actual
+                .iter()
+                .all(|(_, auth)| { auth.as_deref() == Some("Bearer gitlab-test-token") })
+        );
+    }
+
+    #[tokio::test]
+    async fn http_snapshot_paginates_full_gitlab_array_pages() {
+        let _lock = GITLAB_ENV_LOCK.lock().await;
+        let server = test_server(|request| {
+            if request.url_path().ends_with("/repository/branches") {
+                return match request.query() {
+                    Some("per_page=100&page=1") => response(
+                        200,
+                        &serde_json::to_string(
+                            &(0..100)
+                                .map(|index| json!({"name": format!("branch-{index}")}))
+                                .collect::<Vec<_>>(),
+                        )
+                        .unwrap(),
+                    ),
+                    Some("per_page=100&page=2") => {
+                        response(200, r#"[{"name":"last-branch","commit":{"id":"last"}}]"#)
+                    }
+                    query => panic!("unexpected branches query: {query:?}"),
+                };
+            }
+            fixture_response(request, "acme%2Fwidgets")
+        })
+        .await;
+        let _base = EnvVar::set(BASE_URL_ENV, &format!("{}/api/v4/", server.root_url()));
+        let _token = EnvVar::set(TOKEN_ENV, "gitlab-test-token");
+
+        let state = Gitlab.snapshot(&http_repo("acme/widgets")).await;
+
+        let branches = state.branches.data.expect("branches should be paginated");
+        assert_eq!(branches.len(), 101);
+        assert_eq!(branches.last().unwrap().title, "last-branch");
+    }
+
+    #[tokio::test]
+    async fn http_snapshot_preserves_siblings_when_one_endpoint_fails() {
+        let _lock = GITLAB_ENV_LOCK.lock().await;
+        let server = test_server(|request| {
+            if request.url_path().ends_with("/issues") {
+                response(500, r#"{"message":"issues unavailable"}"#)
+            } else {
+                fixture_response(request, "acme%2Fwidgets")
+            }
+        })
+        .await;
+        let _base = EnvVar::set(BASE_URL_ENV, &format!("{}/api/v4/", server.root_url()));
+        let _token = EnvVar::set(TOKEN_ENV, "gitlab-test-token");
+
+        let state = Gitlab.snapshot(&http_repo("acme/widgets")).await;
+
+        assert!(state.issues.data.is_none());
+        assert!(
+            state
+                .issues
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("500") && error.contains("issues unavailable"))
+        );
+        assert_eq!(state.default_branch.data.as_deref(), Some("main"));
+        assert_eq!(state.branches.data.as_ref().map(Vec::len), Some(2));
+        assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
+        assert_eq!(state.published.data.as_ref().map(Vec::len), Some(1));
+        assert_eq!(state.ci.data.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn http_snapshot_isolates_malformed_json_to_its_endpoint() {
+        let _lock = GITLAB_ENV_LOCK.lock().await;
+        let server = test_server(|request| {
+            if request.url_path().ends_with("/pipelines") {
+                response(200, "not-json")
+            } else {
+                fixture_response(request, "acme%2Fwidgets")
+            }
+        })
+        .await;
+        let _base = EnvVar::set(BASE_URL_ENV, &format!("{}/api/v4/", server.root_url()));
+        let _token = EnvVar::set(TOKEN_ENV, "gitlab-test-token");
+
+        let state = Gitlab.snapshot(&http_repo("acme/widgets")).await;
+
+        assert!(state.ci.data.is_none());
+        assert!(
+            state
+                .ci
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Invalid JSON") && error.contains("pipelines"))
+        );
+        assert_eq!(state.default_branch.data.as_deref(), Some("main"));
+        assert_eq!(state.issues.data.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn http_snapshot_without_token_keeps_public_endpoints_available() {
+        let _lock = GITLAB_ENV_LOCK.lock().await;
+        let saw_authorization = Arc::new(Mutex::new(false));
+        let handler_saw_authorization = Arc::clone(&saw_authorization);
+        let server = test_server(move |request| {
+            if request.header("authorization").is_some() {
+                *handler_saw_authorization.lock().unwrap() = true;
+            }
+            if request.url_path() == "/api/v4/user" {
+                response(401, r#"{"message":"401 Unauthorized"}"#)
+            } else {
+                fixture_response(request, "acme%2Fwidgets")
+            }
+        })
+        .await;
+        let _base = EnvVar::set(BASE_URL_ENV, &format!("{}/api/v4/", server.root_url()));
+        let _token = EnvVar::remove(TOKEN_ENV);
+
+        let state = Gitlab.snapshot(&http_repo("acme/widgets")).await;
+
+        assert!(!*saw_authorization.lock().unwrap());
+        assert_eq!(state.default_branch.data.as_deref(), Some("main"));
+        assert_eq!(state.prs.data.as_ref().map(Vec::len), Some(2));
+        assert!(state.review_requests.error.is_some());
+        assert!(!state.publication.supported);
     }
 }
