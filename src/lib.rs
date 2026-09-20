@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+pub mod bitbucket;
 pub mod command;
 pub mod forgejo;
 pub mod git;
