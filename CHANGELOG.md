@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/AraneaDev/phrourion/compare/v0.6.0...v0.7.0) (2026-09-20)
+
+
+### Features
+
+* **tui:** improve workspace and repository discovery ([#35](https://github.com/AraneaDev/phrourion/issues/35)) ([313df6c](https://github.com/AraneaDev/phrourion/commit/313df6c20f43c6b240700ab7c0437e3e113e27c5))
+
 ## [0.6.0](https://github.com/AraneaDev/phrourion/compare/v0.5.0...v0.6.0) (2026-09-20)
 
 
