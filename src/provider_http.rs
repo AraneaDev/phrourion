@@ -10,6 +10,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 pub(crate) enum Auth {
     None,
     Bearer(String),
+    Token(String),
     Basic { username: String, password: String },
 }
 
@@ -25,7 +26,7 @@ impl HttpClient {
             .with_context(|| format!("Invalid provider base URL '{base_url}'"))?;
         if base_url.scheme() == "http"
             && !is_loopback(&base_url)
-            && matches!(&auth, Auth::Bearer(_) | Auth::Basic { .. })
+            && matches!(&auth, Auth::Bearer(_) | Auth::Token(_) | Auth::Basic { .. })
         {
             bail!("Credentialed provider requests require HTTPS unless using a loopback test URL");
         }
@@ -116,6 +117,7 @@ impl HttpClient {
         match &self.auth {
             Auth::None => request,
             Auth::Bearer(token) => request.bearer_auth(token),
+            Auth::Token(token) => request.header("Authorization", format!("token {token}")),
             Auth::Basic { username, password } => request.basic_auth(username, Some(password)),
         }
     }

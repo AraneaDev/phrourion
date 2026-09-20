@@ -1,4 +1,7 @@
-use crate::model::ProviderKind;
+use crate::{
+    model::ProviderKind,
+    provider_http::{Auth, HttpClient},
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -179,8 +182,61 @@ pub fn resolve_credential(
     })
 }
 
+pub async fn test_connection(provider: ProviderKind, host: &str) -> Result<String> {
+    let credential = resolve_credential(&KeyringCredentialStore, provider.clone(), host, None)?;
+    let secret = credential
+        .secret()
+        .context("no saved or environment credential is configured")?;
+    let auth = match provider {
+        ProviderKind::Forgejo => Auth::Token(secret.into()),
+        ProviderKind::Github
+        | ProviderKind::Gitlab
+        | ProviderKind::Bitbucket
+        | ProviderKind::BitbucketServer => Auth::Bearer(secret.into()),
+        ProviderKind::Local => bail!("local repositories do not have provider credentials"),
+    };
+    let client = HttpClient::new(&base_url(&provider, host), auth)?;
+    let path = match provider {
+        ProviderKind::Github => "user",
+        ProviderKind::Gitlab => "user",
+        ProviderKind::Bitbucket | ProviderKind::BitbucketServer => "user",
+        ProviderKind::Forgejo => "user",
+        ProviderKind::Local => unreachable!(),
+    };
+    let value = client.get_json_value(path).await?;
+    Ok(value["login"]
+        .as_str()
+        .or_else(|| value["username"].as_str())
+        .or_else(|| value["login_name"].as_str())
+        .or_else(|| value["nickname"].as_str())
+        .unwrap_or("authenticated user")
+        .into())
+}
+
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn base_url(provider: &ProviderKind, host: &str) -> String {
+    match provider {
+        ProviderKind::Github => std::env::var("PHROURION_GITHUB_BASE_URL").unwrap_or_else(|_| {
+            if host == "github.com" {
+                "https://api.github.com/".into()
+            } else {
+                format!("https://{host}/api/v3/")
+            }
+        }),
+        ProviderKind::Gitlab => std::env::var("PHROURION_GITLAB_BASE_URL")
+            .unwrap_or_else(|_| "https://gitlab.com/api/v4/".into()),
+        ProviderKind::Bitbucket | ProviderKind::BitbucketServer => {
+            std::env::var("PHROURION_BITBUCKET_BASE_URL")
+                .unwrap_or_else(|_| "https://api.bitbucket.org/2.0/".into())
+        }
+        ProviderKind::Forgejo => std::env::var("PHROURION_FORGEJO_TEST_URL")
+            .map(|url| format!("{url}/api/v1/"))
+            .unwrap_or_else(|_| format!("https://{host}/api/v1/")),
+        ProviderKind::Local => String::new(),
+    }
 }
 
 fn keyring_entry(provider: ProviderKind, host: &str) -> Result<keyring::Entry> {
