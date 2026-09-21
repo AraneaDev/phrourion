@@ -77,9 +77,26 @@ fn keyring_cache() -> &'static Mutex<KeyringCache> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// A set()/remove() may land in the cache while an older get() read is
+// still in flight; publishing that read unconditionally on completion
+// would clobber the fresh write with a stale value for a full TTL. Only
+// publish when nothing already in the cache is newer than when this read
+// started.
+fn publish_if_fresh(
+    cache: &mut KeyringCache,
+    cache_key: String,
+    started_at: Instant,
+    value: Option<String>,
+) {
+    if cache.get(&cache_key).is_none_or(|(at, _)| *at < started_at) {
+        cache.insert(cache_key, (Instant::now(), value));
+    }
+}
+
 impl CredentialStore for KeyringCredentialStore {
     fn get(&self, provider: ProviderKind, host: &str) -> Result<Option<String>> {
         let cache_key = key(provider.clone(), host);
+        let started_at = Instant::now();
         if let Ok(cache) = keyring_cache().lock()
             && let Some((at, value)) = cache.get(&cache_key)
             && at.elapsed() < KEYRING_CACHE_TTL
@@ -96,7 +113,7 @@ impl CredentialStore for KeyringCredentialStore {
         if let Ok(value) = &result
             && let Ok(mut cache) = keyring_cache().lock()
         {
-            cache.insert(cache_key, (Instant::now(), value.clone()));
+            publish_if_fresh(&mut cache, cache_key, started_at, value.clone());
         }
         result
     }
@@ -338,4 +355,43 @@ fn keyring_entry(provider: ProviderKind, host: &str) -> Result<keyring::Entry> {
 
 fn key(provider: ProviderKind, host: &str) -> String {
     format!("{:?}:{}", provider, host.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publish_if_fresh_inserts_into_an_empty_cache() {
+        let mut cache = KeyringCache::new();
+        publish_if_fresh(&mut cache, "k".into(), Instant::now(), Some("a".into()));
+        assert_eq!(cache["k"].1, Some("a".into()));
+    }
+
+    #[test]
+    fn publish_if_fresh_overwrites_an_entry_older_than_the_read() {
+        let mut cache = KeyringCache::new();
+        let started_at = Instant::now();
+        cache.insert(
+            "k".into(),
+            (started_at - Duration::from_secs(1), Some("stale".into())),
+        );
+        publish_if_fresh(&mut cache, "k".into(), started_at, Some("fresh".into()));
+        assert_eq!(cache["k"].1, Some("fresh".into()));
+    }
+
+    #[test]
+    fn publish_if_fresh_refuses_to_clobber_a_write_that_landed_during_the_read() {
+        // A set()/remove() from another call can land in the cache after
+        // this read started but before it finished; the stale read must
+        // not overwrite that fresher write.
+        let mut cache = KeyringCache::new();
+        let started_at = Instant::now();
+        cache.insert(
+            "k".into(),
+            (started_at + Duration::from_millis(1), Some("fresh".into())),
+        );
+        publish_if_fresh(&mut cache, "k".into(), started_at, Some("stale".into()));
+        assert_eq!(cache["k"].1, Some("fresh".into()));
+    }
 }
