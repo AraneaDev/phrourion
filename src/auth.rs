@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
+    time::{Duration, Instant},
 };
 
 pub trait CredentialStore: Send + Sync {
@@ -60,28 +61,68 @@ impl ResolvedCredential {
 
 pub type GhFallback<'a> = Option<&'a dyn Fn() -> Result<Option<String>>>;
 
+// A single repo snapshot fans out into several concurrent provider HTTP
+// requests (branches/PRs/issues/releases via tokio::join!), and each one
+// independently resolved credentials, so every poll cycle burst several
+// simultaneous real Secret Service D-Bus calls per repo. Caching reads for
+// a few seconds collapses that burst back down to one real keyring hit;
+// set/remove update the cache directly so a change is visible immediately
+// rather than waiting out the TTL.
+const KEYRING_CACHE_TTL: Duration = Duration::from_secs(10);
+
+type KeyringCache = HashMap<String, (Instant, Option<String>)>;
+
+fn keyring_cache() -> &'static Mutex<KeyringCache> {
+    static CACHE: OnceLock<Mutex<KeyringCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl CredentialStore for KeyringCredentialStore {
     fn get(&self, provider: ProviderKind, host: &str) -> Result<Option<String>> {
+        let cache_key = key(provider.clone(), host);
+        if let Ok(cache) = keyring_cache().lock()
+            && let Some((at, value)) = cache.get(&cache_key)
+            && at.elapsed() < KEYRING_CACHE_TTL
+        {
+            return Ok(value.clone());
+        }
         let entry = keyring_entry(provider, host)?;
-        match entry.get_password() {
+        let result = match entry.get_password() {
             Ok(secret) if !secret.is_empty() => Ok(Some(secret)),
             Ok(_) => Ok(None),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(anyhow::anyhow!("keyring read failed: {error}")),
+        };
+        if let Ok(value) = &result
+            && let Ok(mut cache) = keyring_cache().lock()
+        {
+            cache.insert(cache_key, (Instant::now(), value.clone()));
         }
+        result
     }
 
     fn set(&self, provider: ProviderKind, host: &str, secret: &str) -> Result<()> {
         if secret.is_empty() {
             bail!("credential cannot be empty");
         }
-        keyring_entry(provider, host)?.set_password(secret)?;
+        keyring_entry(provider.clone(), host)?.set_password(secret)?;
+        if let Ok(mut cache) = keyring_cache().lock() {
+            cache.insert(
+                key(provider, host),
+                (Instant::now(), Some(secret.to_string())),
+            );
+        }
         Ok(())
     }
 
     fn remove(&self, provider: ProviderKind, host: &str) -> Result<()> {
-        match keyring_entry(provider, host)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        match keyring_entry(provider.clone(), host)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {
+                if let Ok(mut cache) = keyring_cache().lock() {
+                    cache.insert(key(provider, host), (Instant::now(), None));
+                }
+                Ok(())
+            }
             Err(error) => Err(anyhow::anyhow!("keyring removal failed: {error}")),
         }
     }
