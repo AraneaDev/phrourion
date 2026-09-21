@@ -29,6 +29,7 @@ pub(super) enum Message {
     Local(String, Box<Observation<LocalState>>),
     Remote(String, Box<RemoteState>),
     Fetched(String, Result<()>),
+    BackgroundFetched(String, Result<()>),
     Preview(Box<Result<PullPreview>>),
     CheckoutPreview(Box<Result<CheckoutPreview>>),
     Action(Result<String>),
@@ -313,6 +314,23 @@ pub(super) async fn event_loop(
                     let _ = tx.send(Message::Remote(repo.id, Box::new(state)));
                 });
             }
+            // Keeps ahead/behind current without a manual refresh; local-only
+            // repos have no remote to fetch. Same backoff as the API poll so a
+            // host that is down or unauthenticated is not hammered.
+            if row.repo.identity.kind != ProviderKind::Local
+                && Instant::now() >= row.next_fetch
+                && !row.fetch_busy
+            {
+                row.fetch_busy = true;
+                let repo = row.repo.clone();
+                let tx = tx.clone();
+                let semaphore = semaphore.clone();
+                tasks.spawn(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    let result = git::fetch(&repo).await;
+                    let _ = tx.send(Message::BackgroundFetched(repo.id, result));
+                });
+            }
         }
         while tasks.try_join_next().is_some() {}
         while let Ok(message) = rx.try_recv() {
@@ -361,6 +379,24 @@ pub(super) async fn event_loop(
                     });
                     app.action_busy = false;
                     last_local = Instant::now() - Duration::from_secs(5);
+                }
+                // Silent on both outcomes: this runs continuously in the
+                // background and a failure (offline, no credential, host
+                // down) is expected and already reflected by ahead/behind
+                // staying stale rather than snapping to a false zero.
+                Message::BackgroundFetched(id, result) => {
+                    if let Some(row) = app.rows.iter_mut().find(|r| r.repo.id == id) {
+                        row.fetch_busy = false;
+                        row.fetch_failures =
+                            next_failure_count(row.fetch_failures, result.is_err());
+                        row.next_fetch = Instant::now() + remote_backoff(row.fetch_failures);
+                        if result.is_ok() {
+                            row.fetched = Some(Instant::now());
+                        }
+                    }
+                    if result.is_ok() {
+                        last_local = Instant::now() - Duration::from_secs(5);
+                    }
                 }
                 Message::Preview(result) => {
                     apply_preview_message(app, Message::Preview(result));

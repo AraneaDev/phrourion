@@ -336,6 +336,9 @@ mod tests {
             remote_busy: true,
             next_remote: Instant::now(),
             failures: 0,
+            fetch_busy: true,
+            next_fetch: Instant::now(),
+            fetch_failures: 0,
         }
     }
 
