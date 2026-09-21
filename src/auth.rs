@@ -177,7 +177,11 @@ pub fn resolve_credential(
             source: CredentialSource::Environment,
         });
     }
-    if let Some(secret) = store.get(provider.clone(), host)? {
+    // A keyring backend error (locked, daemon unavailable, no secret
+    // service on a headless host) is treated the same as no saved entry:
+    // fall through the precedence chain rather than failing resolution
+    // outright, matching the documented headless/env-var fallback path.
+    if let Some(secret) = store.get(provider.clone(), host).unwrap_or(None) {
         return Ok(ResolvedCredential {
             secret: Some(secret),
             source: CredentialSource::Keyring,
