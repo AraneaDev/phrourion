@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/AraneaDev/phrourion/compare/v0.8.0...v0.8.1) (2026-09-21)
+
+
+### Bug Fixes
+
+* persist keyring credentials and keep ahead/behind current ([#40](https://github.com/AraneaDev/phrourion/issues/40)) ([b3f99da](https://github.com/AraneaDev/phrourion/commit/b3f99dadae3396a8bcd28d0038be4d70a44a35e9))
+
 ## [0.8.0](https://github.com/AraneaDev/phrourion/compare/v0.7.0...v0.8.0) (2026-09-20)
 
 
