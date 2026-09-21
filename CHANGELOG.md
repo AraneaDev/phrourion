@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/AraneaDev/phrourion/compare/v0.8.1...v0.8.2) (2026-09-21)
+
+
+### Bug Fixes
+
+* cache keyring reads to stop hammering the Secret Service ([#42](https://github.com/AraneaDev/phrourion/issues/42)) ([70a58a6](https://github.com/AraneaDev/phrourion/commit/70a58a6f2e2d1c6cfa67874a660b0e1d2b432066))
+
 ## [0.8.1](https://github.com/AraneaDev/phrourion/compare/v0.8.0...v0.8.1) (2026-09-21)
 
 
