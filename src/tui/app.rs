@@ -48,6 +48,9 @@ pub struct RowState {
     pub remote_busy: bool,
     pub next_remote: Instant,
     pub failures: u32,
+    pub fetch_busy: bool,
+    pub next_fetch: Instant,
+    pub fetch_failures: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -209,6 +212,9 @@ impl App {
                     remote_busy: false,
                     next_remote: Instant::now(),
                     failures: 0,
+                    fetch_busy: false,
+                    next_fetch: Instant::now(),
+                    fetch_failures: 0,
                 })
                 .collect(),
             selected: 0,
