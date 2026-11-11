@@ -983,10 +983,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Normal => keys::compact_footer_hint(),
     };
     let mut footer = vec![Line::from(vec![
-        Span::styled(
-            "aranea.dev  |  ",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("aranea.dev  |  ", Style::default().fg(Color::DarkGray)),
         Span::styled(hint, Style::default().fg(Color::Cyan)),
     ])];
     if matches!(app.mode, Mode::Normal if !app.action_busy)
