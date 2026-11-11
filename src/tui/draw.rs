@@ -984,7 +984,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let mut footer = vec![Line::from(vec![
         Span::styled(
-            "Aranea Development  |  ",
+            "aranea.dev  |  ",
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(hint, Style::default().fg(Color::Cyan)),

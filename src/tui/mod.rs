@@ -559,7 +559,7 @@ mod tests {
             let buffer = terminal.backend().buffer();
             let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
             assert!(text.contains("P H R O U R I O N"));
-            assert!(text.contains("Aranea Development"));
+            assert!(text.contains("aranea.dev"));
             let top: String = buffer
                 .content
                 .iter()
@@ -567,7 +567,7 @@ mod tests {
                 .map(|c| c.symbol())
                 .collect();
             assert!(top.contains("P H R O U R I O N"));
-            assert!(!top.contains("Aranea Development"));
+            assert!(!top.contains("aranea.dev"));
         }
     }
 
