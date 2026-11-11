@@ -89,7 +89,7 @@ fn tower_scene(frame: usize, exiting: bool) -> String {
         (false, _) => "Taking the watch",
     };
     centered(&mut grid, 13, caption);
-    centered(&mut grid, 15, "Aranea Development");
+    centered(&mut grid, 15, "aranea.dev");
     centered(
         &mut grid,
         17,

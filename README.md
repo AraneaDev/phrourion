@@ -13,7 +13,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/AraneaDev/phrourion?label=last%20commit)](https://github.com/AraneaDev/phrourion/commits/main)
 [![Conventional Commits](https://img.shields.io/badge/commits-conventional-fe5196?logo=conventionalcommits&logoColor=white)](https://www.conventionalcommits.org/)
 [![Status](https://img.shields.io/badge/status-pre--release-orange)](#status)
-[![Website](https://img.shields.io/badge/website-aranea--development.nl-0b7285)](https://aranea-development.nl/en/tools/phrourion)
+[![Website](https://img.shields.io/badge/website-aranea.dev-0b7285)](https://aranea.dev/en/tools/phrourion)
 
 <img src="docs/screenshots/dashboard.gif" alt="Phrourion dashboard progressing from loading to healthy and actionable repository states" width="840">
 
@@ -34,8 +34,8 @@ access token or the authenticated `gh` CLI; Forgejo, GitLab, and Bitbucket use
 the same account setup. A user-level registry lets you add checkouts without
 writing configuration into them.
 
-Read the tool page in [English](https://aranea-development.nl/en/tools/phrourion)
-or [Dutch](https://aranea-development.nl/tools/phrourion).
+Read the tool page in [English](https://aranea.dev/en/tools/phrourion)
+or [Dutch](https://aranea.dev/tools/phrourion).
 
 It is for the moment before you start work and the moment before you commit.
 One screen shows whether a checkout is clean, whether its branch is behind, what
@@ -247,4 +247,4 @@ MIT.
 ---
 
 Built by [Tim Schipper](https://tim-schipper.nl/en) and released as open source under
-[Aranea Development](https://aranea-development.nl).
+[aranea.dev](https://aranea.dev).
